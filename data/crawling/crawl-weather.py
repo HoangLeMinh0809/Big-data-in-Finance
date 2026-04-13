@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 API_KEY = os.getenv("WEATHER_API_KEY")
-DATA_DIR = os.getenv("DATA_DIR", "./data/weather")
+DATA_DIR = os.getenv("DATA_DIR", "../weather")
 
 WEATHER_API_URL = "http://api.weatherapi.com/v1/history.json"
 

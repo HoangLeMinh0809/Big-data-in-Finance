@@ -435,6 +435,7 @@ bash scripts/check_pipeline.sh
 - Nếu Kafka total tăng nhưng `Persisted To DataNode = NO`: Spark chưa ghi ra HDFS hoặc HDFS path chưa có file parquet.
 - Nếu có lỗi kết nối, dashboard sẽ hiển thị ở dòng cuối phần `Cluster Status`.
 
+
 ---
 
 ## 8. Lưu ý thiết kế cho Kubernetes
