@@ -283,7 +283,10 @@ services:
   # AIRFLOW INIT — migrate DB va tao admin user
   # ---------------------------------------------------------------------------
   airflow-init:
-    image: apache/airflow:2.9.3
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
     container_name: airflow-init
     hostname: airflow-init
     depends_on:
@@ -295,10 +298,12 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
       AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
     command: >
       bash -c "airflow db migrate &&
       airflow users create
@@ -315,7 +320,10 @@ services:
   # AIRFLOW WEBSERVER
   # ---------------------------------------------------------------------------
   airflow-webserver:
-    image: apache/airflow:2.9.3
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
     container_name: airflow-webserver
     hostname: airflow-webserver
     depends_on:
@@ -329,10 +337,12 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
       AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
     command: webserver
     ports:
       - "8088:8080"
@@ -348,7 +358,10 @@ services:
   # AIRFLOW SCHEDULER
   # ---------------------------------------------------------------------------
   airflow-scheduler:
-    image: apache/airflow:2.9.3
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
     container_name: airflow-scheduler
     hostname: airflow-scheduler
     depends_on:
@@ -362,10 +375,12 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
       AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
     command: scheduler
     networks:
       - bigdata-net
@@ -374,7 +389,10 @@ services:
   # AIRFLOW TRIGGERER
   # ---------------------------------------------------------------------------
   airflow-triggerer:
-    image: apache/airflow:2.9.3
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
     container_name: airflow-triggerer
     hostname: airflow-triggerer
     depends_on:
@@ -388,10 +406,12 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
       AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
     command: triggerer
     networks:
       - bigdata-net
