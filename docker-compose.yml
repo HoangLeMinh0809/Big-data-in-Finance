@@ -231,6 +231,171 @@ services:
     networks:
       - bigdata-net
 
+  # ---------------------------------------------------------------------------
+  # CASSANDRA — serving layer cho truy van latency thap
+  # ---------------------------------------------------------------------------
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    hostname: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: ais-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 256M
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW METADATA DB (Postgres)
+  # ---------------------------------------------------------------------------
+  airflow-postgres:
+    image: postgres:14
+    container_name: airflow-postgres
+    hostname: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW INIT — migrate DB va tao admin user
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    image: apache/airflow:2.9.3
+    container_name: airflow-init
+    hostname: airflow-init
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: >
+      bash -c "airflow db migrate &&
+      airflow users create
+      --username admin
+      --firstname Air
+      --lastname Flow
+      --role Admin
+      --email admin@example.com
+      --password admin"
+    networks:
+      - bigdata-net
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW WEBSERVER
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    image: apache/airflow:2.9.3
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: webserver
+    ports:
+      - "8088:8080"
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8080/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW SCHEDULER
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    image: apache/airflow:2.9.3
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: scheduler
+    networks:
+      - bigdata-net
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW TRIGGERER
+  # ---------------------------------------------------------------------------
+  airflow-triggerer:
+    image: apache/airflow:2.9.3
+    container_name: airflow-triggerer
+    hostname: airflow-triggerer
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: triggerer
+    networks:
+      - bigdata-net
+
 # =============================================================================
 # NETWORKS
 # =============================================================================
@@ -246,4 +411,8 @@ volumes:
   namenode_data:
     driver: local
   datanode_data:
+    driver: local
+  cassandra_data:
+    driver: local
+  airflow_postgres_data:
     driver: local
