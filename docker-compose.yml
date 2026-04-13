@@ -1,6 +1,6 @@
 # =============================================================================
-# Big Data Pipeline Template - Stock Data Processing
-# Luồng: Raw Excel → Python Ingest → Kafka → Spark Streaming → HDFS (Parquet)
+# Atmospheric Intelligence System (AIS)
+# Luồng: Weather/OpenAQ/Sentinel-5P → Python Ingest → Kafka → Spark → Iceberg/HDFS → Cassandra
 # =============================================================================
 
 services:
@@ -146,7 +146,7 @@ services:
       - bigdata-net
 
   # ---------------------------------------------------------------------------
-  # PYTHON INGEST — đọc file Excel, chuẩn hóa, gửi vào Kafka
+  # PYTHON INGEST — chạy producer Weather/OpenAQ và gửi events vào Kafka
   # ---------------------------------------------------------------------------
   ingest:
     build:
@@ -161,15 +161,15 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: stock-prices-daily
-      # Số lượng công ty cào (từ đầu CSV), mặc định 50
+      # Số lượng bản ghi/đối tượng nguồn cần thu thập, mặc định 50
       NUM_COMPANIES: "5"
       # Lookback: lấy dữ liệu bao nhiêu ngày về trước, mặc định 30
       LOOKBACK_DAYS: "30"
       # Delay giữa mỗi message gửi Kafka (ms)
       SEND_DELAY_MS: "10"
-      # Delay giữa mỗi request tới CafeF (ms), tránh bị rate-limit
+      # Delay giữa mỗi request tới nguồn dữ liệu (ms), tránh bị rate-limit
       API_DELAY_MS: "500"
-      # Khoảng cách giữa các vòng cào (giây). 86400=1 ngày, 0=chạy 1 lần
+      # Khoảng cách giữa các vòng thu thập (giây). 86400=1 ngày, 0=chạy 1 lần
       SCRAPE_INTERVAL_SECONDS: "86400"
     networks:
       - bigdata-net
