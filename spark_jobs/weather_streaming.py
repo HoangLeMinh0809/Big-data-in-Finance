@@ -3,7 +3,7 @@
 Weather History — Spark Structured Streaming Job
 =============================================================================
 Chuc nang:
-  1. Doc stream tu Kafka topic "weather_history"
+	1. Doc stream tu Kafka topic "weather-history"
   2. Parse JSON message theo schema output cua ingest_weather
   3. Cast mot so truong thoi gian/phong van
   4. Them cot partition: year, month (dua tren query_date)
@@ -37,7 +37,7 @@ from pyspark.sql.types import (
 # Cau hinh
 # =============================================================================
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
-KAFKA_TOPIC = "weather_history"
+KAFKA_TOPIC = "weather-history"
 HDFS_OUTPUT_PATH = "hdfs://namenode:9000/data/weather_history/"
 CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/weather_history/"
 
