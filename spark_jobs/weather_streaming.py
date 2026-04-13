@@ -8,7 +8,7 @@ Chuc nang:
   3. Cast mot so truong thoi gian/phong van
   4. Them cot partition: year, month (dua tren query_date)
 	5. Ghi Iceberg table tren HDFS warehouse
-  6. Su dung checkpoint de dam bao exactly-once
+	6. Su dung checkpoint de dam bao exactly-once
 
 Luu y: Day la pass-through pipeline, khong co business transform phuc tap.
 =============================================================================
@@ -183,7 +183,7 @@ def main():
 		.format("iceberg")
 		.outputMode("append")
 		.option("checkpointLocation", CHECKPOINT_PATH)
-		.trigger(processingTime="30 seconds")
+		.trigger(availableNow=True)
 		.queryName("weather_history_to_iceberg")
 		.toTable(ICEBERG_TABLE)
 	)

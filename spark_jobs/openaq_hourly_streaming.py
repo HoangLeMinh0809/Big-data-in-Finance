@@ -116,7 +116,7 @@ def main():
         .format("iceberg")
         .outputMode("append")
         .option("checkpointLocation", CHECKPOINT_PATH)
-        .trigger(processingTime="30 seconds")
+        .trigger(availableNow=True)
         .queryName("openaq_hourly_to_iceberg")
         .toTable(ICEBERG_TABLE)
     )
