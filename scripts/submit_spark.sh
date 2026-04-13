@@ -18,16 +18,23 @@ elif [ "$JOB_TYPE" = "weather" ]; then
   JOB_FILE="/opt/spark-jobs/weather_streaming.py"
   HDFS_DATA_DIR="/data/weather_history"
   HDFS_CHECKPOINT_DIR="/checkpoints/weather_history"
+elif [ "$JOB_TYPE" = "openaq" ]; then
+  APP_NAME="OpenAQHourly_Streaming"
+  JOB_FILE="/opt/spark-jobs/openaq_hourly_streaming.py"
+  HDFS_DATA_DIR="/data/openaq_hourly"
+  HDFS_CHECKPOINT_DIR="/checkpoints/openaq_hourly"
 else
-  echo "Usage: $0 [stock|weather]"
+  echo "Usage: $0 [stock|weather|openaq]"
   exit 1
 fi
 
 echo "=== Tạo thư mục output trên HDFS ==="
 docker exec namenode hdfs dfs -mkdir -p "$HDFS_DATA_DIR"
 docker exec namenode hdfs dfs -mkdir -p "$HDFS_CHECKPOINT_DIR"
+docker exec namenode hdfs dfs -mkdir -p /warehouse/iceberg
 docker exec namenode hdfs dfs -chmod -R 777 /data
 docker exec namenode hdfs dfs -chmod -R 777 /checkpoints
+docker exec namenode hdfs dfs -chmod -R 777 /warehouse
 
 echo ""
 echo "=== Submit Spark Streaming Job: $APP_NAME ==="
@@ -35,8 +42,12 @@ docker exec spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
   --deploy-mode client \
   --name "$APP_NAME" \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2 \
   --conf "spark.hadoop.fs.defaultFS=hdfs://namenode:9000" \
+  --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
+  --conf "spark.sql.catalog.ais=org.apache.iceberg.spark.SparkCatalog" \
+  --conf "spark.sql.catalog.ais.type=hadoop" \
+  --conf "spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg" \
   --conf "spark.sql.adaptive.enabled=true" \
   --conf "spark.driver.memory=1g" \
   --conf "spark.executor.memory=1g" \
