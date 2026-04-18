@@ -9,6 +9,7 @@ from pathlib import Path
 from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
@@ -30,6 +31,18 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather-history")
 DATA_DIR = os.getenv("DATA_DIR", "./data/weather")
 MAX_FILES = int(os.getenv("MAX_FILES", "0"))          # 0 = tất cả
 SEND_DELAY_MS = int(os.getenv("SEND_DELAY_MS", "10"))
+
+# SOURCE_MODE: auto | local | api
+SOURCE_MODE = os.getenv("SOURCE_MODE", "auto").strip().lower()
+
+# Weather API config
+WEATHER_API_BASE_URL = os.getenv("WEATHER_API_BASE_URL", "https://api.weatherapi.com/v1")
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "").strip()
+WEATHER_QUERY_LIST = os.getenv("WEATHER_QUERY_LIST", "")
+WEATHER_START_DATE = os.getenv("WEATHER_START_DATE", "")
+WEATHER_END_DATE = os.getenv("WEATHER_END_DATE", "")
+WEATHER_TIMEOUT_SEC = int(os.getenv("WEATHER_TIMEOUT_SEC", "30"))
+WEATHER_API_DELAY_MS = int(os.getenv("WEATHER_API_DELAY_MS", "200"))
 
 
 # =============================================================================
@@ -54,6 +67,23 @@ def extract_query_date_from_filename(filepath: str) -> str:
     return Path(filepath).stem
 
 
+def parse_query_list(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def build_date_range(start_date: str, end_date: str) -> list[str]:
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end_dt < start_dt:
+        raise ValueError("WEATHER_END_DATE phải lớn hơn hoặc bằng WEATHER_START_DATE")
+
+    days = (end_dt - start_dt).days + 1
+    return [
+        start_dt.fromordinal(start_dt.toordinal() + offset).isoformat()
+        for offset in range(days)
+    ]
+
+
 def safe_get(d: dict, *keys, default=None):
     cur = d
     for key in keys:
@@ -63,6 +93,95 @@ def safe_get(d: dict, *keys, default=None):
         if cur is None:
             return default
     return cur
+
+
+def fetch_weather_history(query: str, date_str: str) -> dict:
+    endpoint = f"{WEATHER_API_BASE_URL.rstrip('/')}/history.json"
+    response = requests.get(
+        endpoint,
+        params={
+            "key": WEATHER_API_KEY,
+            "q": query,
+            "dt": date_str,
+        },
+        timeout=WEATHER_TIMEOUT_SEC,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def load_api_payloads() -> list[tuple[str, str, dict, str]]:
+    if not WEATHER_API_KEY:
+        raise ValueError("Thiếu WEATHER_API_KEY cho SOURCE_MODE=api")
+
+    queries = parse_query_list(WEATHER_QUERY_LIST)
+    if not queries:
+        raise ValueError("Thiếu WEATHER_QUERY_LIST cho SOURCE_MODE=api")
+    if not WEATHER_START_DATE or not WEATHER_END_DATE:
+        raise ValueError("Thiếu WEATHER_START_DATE hoặc WEATHER_END_DATE cho SOURCE_MODE=api")
+
+    dates = build_date_range(WEATHER_START_DATE, WEATHER_END_DATE)
+    targets = [(query, date_str) for query in queries for date_str in dates]
+
+    if MAX_FILES > 0:
+        targets = targets[:MAX_FILES]
+
+    logger.info(f"API mode: {len(queries)} locations, {len(dates)} days, {len(targets)} requests")
+
+    payloads = []
+    for query, date_str in targets:
+        try:
+            logger.info(f"--- Gọi API: query={query}, date={date_str} ---")
+            data = fetch_weather_history(query, date_str)
+            source_ref = f"api://weatherapi/history?q={query}&dt={date_str}"
+            payloads.append((query, date_str, data, source_ref))
+
+            if WEATHER_API_DELAY_MS > 0:
+                time.sleep(WEATHER_API_DELAY_MS / 1000.0)
+        except Exception as e:
+            logger.error(f"  Lỗi gọi API query={query}, date={date_str}: {e}")
+
+    return payloads
+
+
+def load_local_payloads() -> list[tuple[str, str, dict, str]]:
+    json_files = sorted(glob.glob(os.path.join(DATA_DIR, "*", "*.json")))
+    if not json_files:
+        logger.error(f"Không tìm thấy file .json nào trong {DATA_DIR}")
+        return []
+
+    logger.info(f"Tìm thấy {len(json_files)} file json")
+
+    if MAX_FILES > 0:
+        json_files = json_files[:MAX_FILES]
+        logger.info(f"Giới hạn xử lý {MAX_FILES} file đầu tiên")
+
+    payloads = []
+    for filepath in json_files:
+        filename = os.path.basename(filepath)
+        province = extract_province_from_path(filepath)
+        query_date = extract_query_date_from_filename(filepath)
+
+        logger.info(f"--- Đang xử lý file local: {filename} (province={province}, date={query_date}) ---")
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            payloads.append((province, query_date, data, filepath))
+        except Exception as e:
+            logger.error(f"  Lỗi đọc file {filename}: {e}")
+
+    return payloads
+
+
+def resolve_source_mode() -> str:
+    if SOURCE_MODE in {"local", "api"}:
+        return SOURCE_MODE
+
+    # auto mode: ưu tiên API nếu có đủ cấu hình, ngược lại dùng local file.
+    if WEATHER_API_KEY and WEATHER_QUERY_LIST and WEATHER_START_DATE and WEATHER_END_DATE:
+        return "api"
+    return "local"
 
 
 # =============================================================================
@@ -183,7 +302,7 @@ def create_kafka_producer(max_retries: int = 10, retry_delay: int = 5) -> KafkaP
             )
             logger.info(f"Kết nối Kafka thành công (attempt {attempt})")
             return producer
-        except NoBrokerAvailable:
+        except NoBrokersAvailable:
             logger.warning(
                 f"Kafka chưa sẵn sàng (attempt {attempt}/{max_retries}), "
                 f"đợi {retry_delay}s..."
@@ -224,40 +343,28 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Kafka: {KAFKA_BOOTSTRAP_SERVERS}")
     logger.info(f"Topic: {KAFKA_TOPIC}")
-    logger.info(f"Data dir: {DATA_DIR}")
     logger.info(f"Max files: {MAX_FILES if MAX_FILES > 0 else 'ALL'}")
+    mode = resolve_source_mode()
+    logger.info(f"Source mode: {mode}")
 
-    json_files = sorted(glob.glob(os.path.join(DATA_DIR, "*", "*.json")))
-    if not json_files:
-        logger.error(f"Không tìm thấy file .json nào trong {DATA_DIR}")
+    payloads = load_api_payloads() if mode == "api" else load_local_payloads()
+    if not payloads:
+        logger.error("Không có dữ liệu đầu vào để ingest")
         return
-
-    logger.info(f"Tìm thấy {len(json_files)} file json")
-
-    if MAX_FILES > 0:
-        json_files = json_files[:MAX_FILES]
-        logger.info(f"Giới hạn xử lý {MAX_FILES} file đầu tiên")
 
     producer = create_kafka_producer()
 
     total_sent = 0
     total_files = 0
 
-    for filepath in json_files:
-        filename = os.path.basename(filepath)
-        province = extract_province_from_path(filepath)
-        query_date = extract_query_date_from_filename(filepath)
-
-        logger.info(f"--- Đang xử lý: {filename} (province={province}, date={query_date}) ---")
+    for province, query_date, data, source_ref in payloads:
+        logger.info(f"--- Normalize: province={province}, date={query_date} ---")
 
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
             events = normalize_weather_history(
                 data=data,
                 province=province,
-                source_file=filepath,
+                source_file=source_ref,
             )
             logger.info(f"  Normalize xong: {len(events)} events")
 
@@ -267,7 +374,7 @@ def main():
             logger.info(f"  Gửi thành công: {sent}/{len(events)} messages")
 
         except Exception as e:
-            logger.error(f"  Lỗi xử lý file {filename}: {e}")
+            logger.error(f"  Lỗi xử lý bản ghi province={province}, date={query_date}: {e}")
             continue
 
     producer.flush()
