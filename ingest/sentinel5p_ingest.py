@@ -1,4 +1,3 @@
-
 import json
 import logging
 import os
@@ -84,7 +83,33 @@ DATE_END = os.getenv("DATE_END") or datetime.now(timezone.utc).strftime("%Y-%m-%
 DATE_START = os.getenv("DATE_START") or (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
 
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "1"))
-PRODUCTS = [p.strip() for p in os.getenv("PRODUCTS", "NO2,CO,O3,SO2,CH4,AER").split(",") if p.strip()]
+PRODUCTS = [
+    p.strip()
+    for p in os.getenv("PRODUCTS", "NO2,CO,O3,SO2,CH4,AER").split(",")
+    if p.strip()
+]
+
+# -----------------------------------------------------------------------------
+# Ingest thresholds
+# -----------------------------------------------------------------------------
+# QA threshold by product (requested): NO2+SO2=0.75; others=0.5
+QA_THRESHOLDS = {
+    "NO2": 0.75,
+    "SO2": 0.75,
+    "CO": 0.5,
+    "O3": 0.5,
+    "AER": 0.5,
+    "CH4": 0.5,
+}
+
+# Hotspot configuration: emit top-N pixels above threshold for selected products
+HOTSPOT_PRODUCTS = {"AER", "CO"}
+HOTSPOT_THRESHOLDS = {
+    # These are conservative defaults; override via env if needed.
+    "AER": float(os.getenv("AER_HOTSPOT_THRESHOLD", "2.0")),
+    "CO": float(os.getenv("CO_HOTSPOT_THRESHOLD", "0.05")),
+}
+HOTSPOT_TOP_N = int(os.getenv("HOTSPOT_TOP_N", "200"))
 
 
 def get_access_token(username: str, password: str) -> str:
@@ -100,6 +125,134 @@ def get_access_token(username: str, password: str) -> str:
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
+
+
+def _pick_group_and_var(ds: nc.Dataset, product_key: str):
+    p = PRODUCTS_DEF[product_key]
+    group = ds.groups.get(p["group"])
+    if group is None:
+        for g in ds.groups.values():
+            if p["variable"] in g.variables:
+                group = g
+                break
+    if group is None or p["variable"] not in group.variables:
+        raise KeyError(f"Variable '{p['variable']}' not found")
+    return group, group.variables[p["variable"]]
+
+
+def _find_lat_lon(group: nc.Group):
+    """Best-effort lookup lat/lon arrays inside the same group.
+
+    Many S5P L2 products store geolocation in PRODUCT group.
+    Common names include: latitude/longitude.
+    """
+    lat = None
+    lon = None
+    for cand in ("latitude", "lat"):
+        if cand in group.variables:
+            lat = group.variables[cand]
+            break
+    for cand in ("longitude", "lon"):
+        if cand in group.variables:
+            lon = group.variables[cand]
+            break
+    return lat, lon
+
+
+def _apply_masks(
+    var: np.ndarray,
+    var_nc,
+    group: nc.Group,
+    product_key: str,
+    bbox=None,
+):
+    # mask fill values
+    fill = getattr(var_nc, "_FillValue", None)
+    if fill is not None:
+        var[var == fill] = np.nan
+    var[var < -1e30] = np.nan
+
+    # QA mask (product-specific threshold)
+    if "qa_value" in group.variables:
+        qa = group.variables["qa_value"][0].data
+        thr = float(QA_THRESHOLDS.get(product_key, 0.5))
+        var[qa < thr] = np.nan
+
+    # BBOX crop (requested): read lat/lon then mask outside bbox
+    if bbox is not None:
+        lat_nc, lon_nc = _find_lat_lon(group)
+        if lat_nc is not None and lon_nc is not None:
+            lat = lat_nc[0].data.astype(float)
+            lon = lon_nc[0].data.astype(float)
+            lon_min, lat_min, lon_max, lat_max = bbox
+            inside = (
+                (lat >= lat_min)
+                & (lat <= lat_max)
+                & (lon >= lon_min)
+                & (lon <= lon_max)
+            )
+            var[~inside] = np.nan
+
+    return var
+
+
+def _extract_hotspots(
+    group: nc.Group,
+    var_nc,
+    var_masked: np.ndarray,
+    product_key: str,
+    bbox,
+):
+    """Return list[dict] hotspots: {lat, lon, value}.
+
+    Only for products in HOTSPOT_PRODUCTS.
+    """
+    if product_key not in HOTSPOT_PRODUCTS:
+        return []
+
+    threshold = float(HOTSPOT_THRESHOLDS.get(product_key, float("inf")))
+    if not np.isfinite(threshold):
+        return []
+
+    lat_nc, lon_nc = _find_lat_lon(group)
+    if lat_nc is None or lon_nc is None:
+        return []
+
+    lat = lat_nc[0].data.astype(float)
+    lon = lon_nc[0].data.astype(float)
+
+    # Candidate mask: finite and above threshold
+    mask = np.isfinite(var_masked) & (var_masked >= threshold)
+    if not mask.any():
+        return []
+
+    vals = var_masked[mask]
+    lats = lat[mask]
+    lons = lon[mask]
+
+    # Take top-N by value
+    if vals.size > HOTSPOT_TOP_N:
+        idx = np.argpartition(vals, -HOTSPOT_TOP_N)[-HOTSPOT_TOP_N:]
+        # sort desc
+        idx = idx[np.argsort(vals[idx])[::-1]]
+        vals = vals[idx]
+        lats = lats[idx]
+        lons = lons[idx]
+    else:
+        order = np.argsort(vals)[::-1]
+        vals = vals[order]
+        lats = lats[order]
+        lons = lons[order]
+
+    hotspots = []
+    for la, lo, va in zip(lats.tolist(), lons.tolist(), vals.tolist()):
+        hotspots.append({
+            "lat": float(la),
+            "lon": float(lo),
+            "value": float(va),
+        })
+
+    return hotspots
 
 
 def search_products(product_key: str, token: str) -> list[dict]:
@@ -128,7 +281,7 @@ def search_products(product_key: str, token: str) -> list[dict]:
     }
 
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(ODATA_URL, params=params, headers=headers, timeout=60)
+    resp = requests.get(ODATA_URL, params=params, headers=headers, timeout=(10, 60))
     resp.raise_for_status()
     return resp.json().get("value", [])
 
@@ -142,7 +295,8 @@ def download_product(product: dict, token: str) -> Path:
     url = f"{DOWNLOAD_URL}({product['Id']})/$value"
     headers = {"Authorization": f"Bearer {token}"}
 
-    with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+    # For big files (hundreds of MB): short connect timeout, no read timeout.
+    with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
@@ -156,42 +310,33 @@ def compute_stats(nc_path: Path, product_key: str) -> dict:
     p = PRODUCTS_DEF[product_key]
     ds = nc.Dataset(nc_path)
 
-    group = ds.groups.get(p["group"])
-    if group is None:
-        # Fallback: search all groups
-        for g in ds.groups.values():
-            if p["variable"] in g.variables:
-                group = g
-                break
+    try:
+        group, var_nc = _pick_group_and_var(ds, product_key)
 
-    if group is None or p["variable"] not in group.variables:
+        # Read first time slice [0]
+        var = var_nc[0].data.astype(float)
+
+        # Apply masks + bbox crop before computing stats
+        var = _apply_masks(var, var_nc, group, product_key, bbox=BBOX)
+
+        valid = np.isfinite(var)
+        valid_pct = float(valid.sum() / var.size * 100.0) if var.size else 0.0
+
+        stats = {
+            "min": float(np.nanmin(var)) if valid.any() else None,
+            "max": float(np.nanmax(var)) if valid.any() else None,
+            "mean": float(np.nanmean(var)) if valid.any() else None,
+            "valid_pct": valid_pct,
+        }
+
+        # Hotspots for AER/CO (requested)
+        hotspots = _extract_hotspots(group, var_nc, var, product_key, bbox=BBOX)
+        if hotspots:
+            stats["hotspots"] = hotspots
+
+        return stats
+    finally:
         ds.close()
-        raise KeyError(f"Variable '{p['variable']}' not found in {nc_path.name}")
-
-    var = group.variables[p["variable"]][0].data.astype(float)
-
-    # mask fill values
-    fill = getattr(group.variables[p["variable"]], "_FillValue", None)
-    if fill is not None:
-        var[var == fill] = np.nan
-    var[var < -1e30] = np.nan
-
-    if "qa_value" in group.variables:
-        qa = group.variables["qa_value"][0].data
-        var[qa < 0.5] = np.nan
-
-    valid = np.isfinite(var)
-    valid_pct = float(valid.sum() / var.size * 100.0) if var.size else 0.0
-
-    stats = {
-        "min": float(np.nanmin(var)) if valid.any() else None,
-        "max": float(np.nanmax(var)) if valid.any() else None,
-        "mean": float(np.nanmean(var)) if valid.any() else None,
-        "valid_pct": valid_pct,
-    }
-
-    ds.close()
-    return stats
 
 
 def create_kafka_producer(max_retries: int = 10, retry_delay: int = 5) -> KafkaProducer:
