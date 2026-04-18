@@ -1,9 +1,3 @@
-#!/bin/bash
-# =============================================================================
-# Tạo Kafka topic cho stock-prices-daily
-# Chạy bên trong container kafka
-# =============================================================================
-
 echo "=== Tạo Kafka topic: stock-prices-daily ==="
 
 docker exec kafka kafka-topics \
