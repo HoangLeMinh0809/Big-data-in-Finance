@@ -3,12 +3,12 @@
 Weather History — Spark Structured Streaming Job
 =============================================================================
 Chuc nang:
-  1. Doc stream tu Kafka topic "weather_history"
+	1. Doc stream tu Kafka topic "weather-history"
   2. Parse JSON message theo schema output cua ingest_weather
   3. Cast mot so truong thoi gian/phong van
   4. Them cot partition: year, month (dua tren query_date)
-  5. Ghi Parquet ra HDFS tai /data/weather_history/
-  6. Su dung checkpoint de dam bao exactly-once
+	5. Ghi Iceberg table tren HDFS warehouse
+	6. Su dung checkpoint de dam bao exactly-once
 
 Luu y: Day la pass-through pipeline, khong co business transform phuc tap.
 =============================================================================
@@ -37,9 +37,11 @@ from pyspark.sql.types import (
 # Cau hinh
 # =============================================================================
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
-KAFKA_TOPIC = "weather_history"
-HDFS_OUTPUT_PATH = "hdfs://namenode:9000/data/weather_history/"
+KAFKA_TOPIC = "weather-history"
 CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/weather_history/"
+ICEBERG_CATALOG = "ais"
+ICEBERG_WAREHOUSE = "hdfs://namenode:9000/warehouse/iceberg"
+ICEBERG_TABLE = f"{ICEBERG_CATALOG}.weather.weather_history_bronze"
 
 # =============================================================================
 # Schema cho JSON message tu Kafka
@@ -104,6 +106,10 @@ def main():
 	spark = (
 		SparkSession.builder
 		.appName("WeatherHistory_Streaming")
+		.config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+		.config(f"spark.sql.catalog.{ICEBERG_CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
+		.config(f"spark.sql.catalog.{ICEBERG_CATALOG}.type", "hadoop")
+		.config(f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse", ICEBERG_WAREHOUSE)
 		.config("spark.sql.streaming.checkpointLocation", CHECKPOINT_PATH)
 		.config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000")
 		.getOrCreate()
@@ -155,25 +161,37 @@ def main():
 		.withColumn("spark_processed_at", current_timestamp())
 	)
 
+	# Tao namespace va bang Iceberg neu chua ton tai.
+	spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")
+	if not spark.catalog.tableExists(ICEBERG_TABLE):
+		(
+			final_df
+			.limit(0)
+			.writeTo(ICEBERG_TABLE)
+			.using("iceberg")
+			.tableProperty("format-version", "2")
+			.partitionedBy(col("year"), col("month"))
+			.create()
+		)
+
 	# =========================================================================
-	# 5. Ghi ra HDFS duoi dang Parquet
+	# 5. Ghi ra Iceberg table
 	# =========================================================================
 	query = (
 		final_df
 		.writeStream
+		.format("iceberg")
 		.outputMode("append")
-		.format("parquet")
-		.option("path", HDFS_OUTPUT_PATH)
 		.option("checkpointLocation", CHECKPOINT_PATH)
-		.partitionBy("year", "month")
-		.trigger(processingTime="30 seconds")
-		.queryName("weather_history_to_hdfs")
-		.start()
+		.trigger(availableNow=True)
+		.queryName("weather_history_to_iceberg")
+		.toTable(ICEBERG_TABLE)
 	)
 
 	print(f"Streaming query started: {query.name}")
 	print(f"  Kafka topic: {KAFKA_TOPIC}")
-	print(f"  HDFS output: {HDFS_OUTPUT_PATH}")
+	print(f"  Iceberg table: {ICEBERG_TABLE}")
+	print(f"  Iceberg warehouse: {ICEBERG_WAREHOUSE}")
 	print(f"  Checkpoint:  {CHECKPOINT_PATH}")
 	print("Waiting for data...")
 

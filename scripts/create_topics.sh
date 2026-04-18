@@ -1,17 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# Tạo Kafka topic cho stock-prices-daily
+# Tạo Kafka topics cho pipeline
 # Chạy bên trong container kafka
 # =============================================================================
 
-echo "=== Tạo Kafka topic: stock-prices-daily ==="
+echo "=== Tạo Kafka topic: weather-history ==="
 
 docker exec kafka kafka-topics \
   --create \
   --bootstrap-server kafka:9092 \
   --replication-factor 1 \
   --partitions 3 \
-  --topic stock-prices-daily \
+  --topic weather-history \
   --if-not-exists
 
 echo ""
@@ -21,8 +21,8 @@ docker exec kafka kafka-topics \
   --bootstrap-server kafka:9092
 
 echo ""
-echo "=== Chi tiết topic stock-prices-daily ==="
+echo "=== Chi tiết topic weather-history ==="
 docker exec kafka kafka-topics \
   --describe \
   --bootstrap-server kafka:9092 \
-  --topic stock-prices-daily
+  --topic weather-history
