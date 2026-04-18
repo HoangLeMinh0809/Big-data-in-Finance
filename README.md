@@ -286,12 +286,6 @@ Mở HDFS Web UI: http://localhost:9870 -> Utilities -> Browse the file system -
 
 ### Cassandra
 
-```bash
-docker exec cassandra cqlsh -e "DESCRIBE KEYSPACE ais_serving;"
-docker exec cassandra cqlsh -e "SELECT * FROM ais_serving.weather_hourly_by_province_day LIMIT 5;"
-docker exec cassandra cqlsh -e "SELECT * FROM ais_serving.openaq_hourly_by_city_parameter_day LIMIT 5;"
-```
-
 ---
 
 ## 8. Lưu ý thiết kế cho Kubernetes

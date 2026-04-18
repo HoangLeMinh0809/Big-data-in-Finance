@@ -1,0 +1,70 @@
+{
+  "timestamp": "2025-01-02T09:00:00Z",
+  "provinces": [
+    { "province": "ha_noi", "temp": 19.8, "humidity": 67, "wind": 6.6, "pressure": 1014, "wind_kph": 6.6, "pressure_mb": 1014, "precip_mm": 0, "cloud": 54, "uv": 2.4, "visibility_km": 5.9, "condition": "Light rain" },
+    { "province": "hai_phong", "temp": 18.7, "humidity": 81, "wind": 8.7, "pressure": 1015, "wind_kph": 8.7, "pressure_mb": 1015, "precip_mm": 0, "cloud": 85, "uv": 4.5, "visibility_km": 9.8, "condition": "Cloudy" },
+    { "province": "quang_ninh", "temp": 19.9, "humidity": 80, "wind": 13.7, "pressure": 1016, "wind_kph": 13.7, "pressure_mb": 1016, "precip_mm": 0, "cloud": 20, "uv": 2.6, "visibility_km": 6.1, "condition": "Light rain" },
+    { "province": "thai_nguyen", "temp": 18.9, "humidity": 79, "wind": 10.4, "pressure": 1015, "wind_kph": 10.4, "pressure_mb": 1015, "precip_mm": 1.2, "cloud": 25, "uv": 5.2, "visibility_km": 6.1, "condition": "Partly cloudy" },
+    { "province": "bac_ninh", "temp": 17.2, "humidity": 76, "wind": 14.0, "pressure": 1015, "wind_kph": 14.0, "pressure_mb": 1015, "precip_mm": 0, "cloud": 69, "uv": 2.8, "visibility_km": 7.6, "condition": "Cloudy" },
+    { "province": "lao_cai", "temp": 15.8, "humidity": 81, "wind": 11.1, "pressure": 1016, "wind_kph": 11.1, "pressure_mb": 1016, "precip_mm": 0, "cloud": 87, "uv": 5.4, "visibility_km": 7.1, "condition": "Partly cloudy" },
+    { "province": "thanh_hoa", "temp": 22.2, "humidity": 78, "wind": 14.5, "pressure": 1011, "wind_kph": 14.5, "pressure_mb": 1011, "precip_mm": 0, "cloud": 91, "uv": 4.0, "visibility_km": 7.7, "condition": "Light rain" },
+    { "province": "nghe_an", "temp": 19.3, "humidity": 78, "wind": 15.7, "pressure": 1011, "wind_kph": 15.7, "pressure_mb": 1011, "precip_mm": 0.7, "cloud": 69, "uv": 5.9, "visibility_km": 7.8, "condition": "Partly cloudy" },
+    { "province": "ha_tinh", "temp": 21.5, "humidity": 81, "wind": 5.7, "pressure": 1014, "wind_kph": 5.7, "pressure_mb": 1014, "precip_mm": 0, "cloud": 88, "uv": 5.2, "visibility_km": 6.5, "condition": "Light rain" },
+    { "province": "thua_thien_hue", "temp": 21.6, "humidity": 72, "wind": 15.5, "pressure": 1014, "wind_kph": 15.5, "pressure_mb": 1014, "precip_mm": 1.2, "cloud": 90, "uv": 1.6, "visibility_km": 9.4, "condition": "Light rain" },
+    { "province": "da_nang", "temp": 23.8, "humidity": 71, "wind": 7.7, "pressure": 1012, "wind_kph": 7.7, "pressure_mb": 1012, "precip_mm": 0.5, "cloud": 74, "uv": 2.5, "visibility_km": 6.8, "condition": "Light rain" },
+    { "province": "quang_nam", "temp": 22.1, "humidity": 78, "wind": 13.3, "pressure": 1012, "wind_kph": 13.3, "pressure_mb": 1012, "precip_mm": 0, "cloud": 45, "uv": 4.5, "visibility_km": 9.3, "condition": "Partly cloudy" },
+    { "province": "quang_ngai", "temp": 25.4, "humidity": 67, "wind": 5.7, "pressure": 1011, "wind_kph": 5.7, "pressure_mb": 1011, "precip_mm": 0.7, "cloud": 60, "uv": 4.4, "visibility_km": 9.7, "condition": "Light rain" },
+    { "province": "binh_dinh", "temp": 23.8, "humidity": 76, "wind": 15.0, "pressure": 1012, "wind_kph": 15.0, "pressure_mb": 1012, "precip_mm": 0, "cloud": 44, "uv": 3.7, "visibility_km": 9.5, "condition": "Sunny" },
+    { "province": "khanh_hoa", "temp": 27.3, "humidity": 75, "wind": 10.2, "pressure": 1013, "wind_kph": 10.2, "pressure_mb": 1013, "precip_mm": 0, "cloud": 28, "uv": 6.4, "visibility_km": 9.0, "condition": "Light rain" },
+    { "province": "dak_lak", "temp": 24.3, "humidity": 81, "wind": 9.0, "pressure": 1012, "wind_kph": 9.0, "pressure_mb": 1012, "precip_mm": 0, "cloud": 21, "uv": 7.4, "visibility_km": 7.0, "condition": "Sunny" },
+    { "province": "lam_dong", "temp": 20.3, "humidity": 78, "wind": 15.0, "pressure": 1011, "wind_kph": 15.0, "pressure_mb": 1011, "precip_mm": 2.9, "cloud": 85, "uv": 4.8, "visibility_km": 9.6, "condition": "Light rain" },
+    { "province": "ho_chi_minh", "temp": 28.0, "humidity": 81, "wind": 11.0, "pressure": 1010, "wind_kph": 11.0, "pressure_mb": 1010, "precip_mm": 2.4, "cloud": 87, "uv": 3.0, "visibility_km": 7.0, "condition": "Cloudy" },
+    { "province": "binh_duong", "temp": 28.2, "humidity": 80, "wind": 13.7, "pressure": 1012, "wind_kph": 13.7, "pressure_mb": 1012, "precip_mm": 0.8, "cloud": 37, "uv": 4.1, "visibility_km": 8.3, "condition": "Partly cloudy" },
+    { "province": "dong_nai", "temp": 29.3, "humidity": 82, "wind": 7.1, "pressure": 1010, "wind_kph": 7.1, "pressure_mb": 1010, "precip_mm": 0, "cloud": 81, "uv": 5.0, "visibility_km": 9.9, "condition": "Cloudy" },
+    { "province": "ba_ria_vung_tau", "temp": 24.9, "humidity": 77, "wind": 7.3, "pressure": 1009, "wind_kph": 7.3, "pressure_mb": 1009, "precip_mm": 0, "cloud": 85, "uv": 3.5, "visibility_km": 7.4, "condition": "Light rain" },
+    { "province": "tay_ninh", "temp": 26.5, "humidity": 88, "wind": 14.2, "pressure": 1011, "wind_kph": 14.2, "pressure_mb": 1011, "precip_mm": 0, "cloud": 51, "uv": 6.8, "visibility_km": 6.1, "condition": "Light rain" },
+    { "province": "long_an", "temp": 27.8, "humidity": 78, "wind": 13.6, "pressure": 1011, "wind_kph": 13.6, "pressure_mb": 1011, "precip_mm": 1.6, "cloud": 58, "uv": 7.1, "visibility_km": 6.0, "condition": "Light rain" },
+    { "province": "tien_giang", "temp": 29.1, "humidity": 89, "wind": 11.3, "pressure": 1012, "wind_kph": 11.3, "pressure_mb": 1012, "precip_mm": 3.7, "cloud": 57, "uv": 4.7, "visibility_km": 6.2, "condition": "Sunny" },
+    { "province": "can_tho", "temp": 27.9, "humidity": 91, "wind": 11.2, "pressure": 1010, "wind_kph": 11.2, "pressure_mb": 1010, "precip_mm": 1.6, "cloud": 34, "uv": 3.0, "visibility_km": 5.7, "condition": "Light rain" },
+    { "province": "an_giang", "temp": 25.1, "humidity": 86, "wind": 15.7, "pressure": 1010, "wind_kph": 15.7, "pressure_mb": 1010, "precip_mm": 0.6, "cloud": 36, "uv": 3.7, "visibility_km": 5.7, "condition": "Sunny" },
+    { "province": "kien_giang", "temp": 29.3, "humidity": 76, "wind": 12.6, "pressure": 1011, "wind_kph": 12.6, "pressure_mb": 1011, "precip_mm": 2.7, "cloud": 74, "uv": 7.1, "visibility_km": 7.7, "condition": "Cloudy" },
+    { "province": "ca_mau", "temp": 28.4, "humidity": 86, "wind": 7.1, "pressure": 1012, "wind_kph": 7.1, "pressure_mb": 1012, "precip_mm": 0, "cloud": 74, "uv": 2.7, "visibility_km": 6.4, "condition": "Cloudy" }
+  ],
+  "series": {
+    "ha_noi": [
+      { "timestamp": "2025-01-02T05:00:00Z", "temp": 18.2, "humidity": 72, "wind": 5.4, "pressure": 1015 },
+      { "timestamp": "2025-01-02T06:00:00Z", "temp": 18.7, "humidity": 71, "wind": 5.8, "pressure": 1015 },
+      { "timestamp": "2025-01-02T07:00:00Z", "temp": 19.1, "humidity": 70, "wind": 6.1, "pressure": 1014 },
+      { "timestamp": "2025-01-02T08:00:00Z", "temp": 19.5, "humidity": 68, "wind": 6.3, "pressure": 1014 },
+      { "timestamp": "2025-01-02T09:00:00Z", "temp": 19.8, "humidity": 67, "wind": 6.6, "pressure": 1014 }
+    ],
+    "hai_phong": [
+      { "timestamp": "2025-01-02T05:00:00Z", "temp": 17.5, "humidity": 84, "wind": 7.1, "pressure": 1016 },
+      { "timestamp": "2025-01-02T06:00:00Z", "temp": 17.9, "humidity": 83, "wind": 7.6, "pressure": 1016 },
+      { "timestamp": "2025-01-02T07:00:00Z", "temp": 18.2, "humidity": 82, "wind": 8.0, "pressure": 1015 },
+      { "timestamp": "2025-01-02T08:00:00Z", "temp": 18.5, "humidity": 82, "wind": 8.4, "pressure": 1015 },
+      { "timestamp": "2025-01-02T09:00:00Z", "temp": 18.7, "humidity": 81, "wind": 8.7, "pressure": 1015 }
+    ],
+    "da_nang": [
+      { "timestamp": "2025-01-02T05:00:00Z", "temp": 22.1, "humidity": 75, "wind": 6.2, "pressure": 1013 },
+      { "timestamp": "2025-01-02T06:00:00Z", "temp": 22.5, "humidity": 74, "wind": 6.7, "pressure": 1013 },
+      { "timestamp": "2025-01-02T07:00:00Z", "temp": 22.9, "humidity": 73, "wind": 7.1, "pressure": 1012 },
+      { "timestamp": "2025-01-02T08:00:00Z", "temp": 23.4, "humidity": 72, "wind": 7.4, "pressure": 1012 },
+      { "timestamp": "2025-01-02T09:00:00Z", "temp": 23.8, "humidity": 71, "wind": 7.7, "pressure": 1012 }
+    ],
+    "ho_chi_minh": [
+      { "timestamp": "2025-01-02T05:00:00Z", "temp": 26.4, "humidity": 84, "wind": 9.2, "pressure": 1011 },
+      { "timestamp": "2025-01-02T06:00:00Z", "temp": 26.9, "humidity": 83, "wind": 9.6, "pressure": 1011 },
+      { "timestamp": "2025-01-02T07:00:00Z", "temp": 27.3, "humidity": 82, "wind": 10.0, "pressure": 1010 },
+      { "timestamp": "2025-01-02T08:00:00Z", "temp": 27.7, "humidity": 81, "wind": 10.5, "pressure": 1010 },
+      { "timestamp": "2025-01-02T09:00:00Z", "temp": 28.0, "humidity": 81, "wind": 11.0, "pressure": 1010 }
+    ],
+    "can_tho": [
+      { "timestamp": "2025-01-02T05:00:00Z", "temp": 26.2, "humidity": 94, "wind": 9.4, "pressure": 1011 },
+      { "timestamp": "2025-01-02T06:00:00Z", "temp": 26.7, "humidity": 93, "wind": 9.8, "pressure": 1011 },
+      { "timestamp": "2025-01-02T07:00:00Z", "temp": 27.1, "humidity": 92, "wind": 10.3, "pressure": 1010 },
+      { "timestamp": "2025-01-02T08:00:00Z", "temp": 27.5, "humidity": 91, "wind": 10.8, "pressure": 1010 },
+      { "timestamp": "2025-01-02T09:00:00Z", "temp": 27.9, "humidity": 91, "wind": 11.2, "pressure": 1010 }
+    ]
+  }
+}

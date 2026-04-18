@@ -1,0 +1,76 @@
+{
+  "timestamp": "2025-01-02T09:00:00Z",
+  "summary": {
+    "avg_pm25": 32.4,
+    "avg_aqi": 67,
+    "worst_region": "ha_noi",
+    "alert_regions": 2
+  },
+  "provinces": [
+    { "province": "ha_noi", "pm25": 61.3, "pm10": 78.4, "no2": 25.0, "so2": 6.8, "o3": 25.5, "co": 0.69, "aqi": 126, "status": "unhealthy" },
+    { "province": "hai_phong", "pm25": 57.2, "pm10": 76.5, "no2": 25.3, "so2": 5.4, "o3": 20.1, "co": 0.68, "aqi": 121, "status": "unhealthy" },
+    { "province": "quang_ninh", "pm25": 47.5, "pm10": 69.4, "no2": 16.7, "so2": 6.1, "o3": 17.5, "co": 0.6, "aqi": 88, "status": "moderate" },
+    { "province": "thai_nguyen", "pm25": 41.6, "pm10": 65.5, "no2": 14.2, "so2": 3.6, "o3": 25.2, "co": 0.59, "aqi": 75, "status": "moderate" },
+    { "province": "bac_ninh", "pm25": 50.5, "pm10": 66.0, "no2": 19.6, "so2": 5.7, "o3": 20.5, "co": 0.68, "aqi": 95, "status": "moderate" },
+    { "province": "lao_cai", "pm25": 30.2, "pm10": 51.0, "no2": 13.9, "so2": 4.1, "o3": 20.4, "co": 0.43, "aqi": 61, "status": "moderate" },
+    { "province": "thanh_hoa", "pm25": 39.5, "pm10": 61.6, "no2": 15.9, "so2": 5.2, "o3": 23.1, "co": 0.56, "aqi": 84, "status": "moderate" },
+    { "province": "nghe_an", "pm25": 27.9, "pm10": 38.4, "no2": 8.2, "so2": 2.9, "o3": 22.1, "co": 0.43, "aqi": 53, "status": "good" },
+    { "province": "ha_tinh", "pm25": 39.4, "pm10": 57.7, "no2": 14.8, "so2": 4.5, "o3": 18.8, "co": 0.49, "aqi": 86, "status": "moderate" },
+    { "province": "thua_thien_hue", "pm25": 32.5, "pm10": 46.1, "no2": 11.9, "so2": 2.7, "o3": 25.5, "co": 0.48, "aqi": 65, "status": "moderate" },
+    { "province": "da_nang", "pm25": 29.7, "pm10": 52.7, "no2": 11.6, "so2": 2.7, "o3": 22.6, "co": 0.41, "aqi": 63, "status": "moderate" },
+    { "province": "quang_nam", "pm25": 29.1, "pm10": 48.0, "no2": 9.2, "so2": 2.5, "o3": 25.4, "co": 0.51, "aqi": 52, "status": "good" },
+    { "province": "quang_ngai", "pm25": 21.8, "pm10": 43.1, "no2": 9.5, "so2": 1.4, "o3": 25.1, "co": 0.43, "aqi": 39, "status": "good" },
+    { "province": "binh_dinh", "pm25": 20.4, "pm10": 33.1, "no2": 9.6, "so2": 3.1, "o3": 16.7, "co": 0.44, "aqi": 45, "status": "good" },
+    { "province": "khanh_hoa", "pm25": 26.0, "pm10": 36.1, "no2": 9.6, "so2": 2.2, "o3": 17.0, "co": 0.44, "aqi": 51, "status": "good" },
+    { "province": "dak_lak", "pm25": 23.6, "pm10": 47.6, "no2": 11.3, "so2": 4.1, "o3": 18.8, "co": 0.45, "aqi": 52, "status": "good" },
+    { "province": "lam_dong", "pm25": 15.1, "pm10": 26.8, "no2": 7.1, "so2": 1.0, "o3": 16.5, "co": 0.33, "aqi": 31, "status": "good" },
+    { "province": "ho_chi_minh", "pm25": 32.3, "pm10": 43.0, "no2": 10.4, "so2": 4.0, "o3": 17.1, "co": 0.48, "aqi": 71, "status": "moderate" },
+    { "province": "binh_duong", "pm25": 41.3, "pm10": 53.7, "no2": 20.2, "so2": 4.8, "o3": 25.9, "co": 0.5, "aqi": 88, "status": "moderate" },
+    { "province": "dong_nai", "pm25": 31.6, "pm10": 45.1, "no2": 15.6, "so2": 3.5, "o3": 22.5, "co": 0.48, "aqi": 57, "status": "good" },
+    { "province": "ba_ria_vung_tau", "pm25": 20.1, "pm10": 33.2, "no2": 11.8, "so2": 2.8, "o3": 23.2, "co": 0.42, "aqi": 41, "status": "good" },
+    { "province": "tay_ninh", "pm25": 35.7, "pm10": 55.0, "no2": 14.7, "so2": 4.0, "o3": 18.5, "co": 0.5, "aqi": 78, "status": "moderate" },
+    { "province": "long_an", "pm25": 24.6, "pm10": 37.4, "no2": 12.9, "so2": 4.1, "o3": 18.7, "co": 0.42, "aqi": 54, "status": "good" },
+    { "province": "tien_giang", "pm25": 20.0, "pm10": 43.4, "no2": 5.7, "so2": 1.8, "o3": 18.4, "co": 0.44, "aqi": 46, "status": "good" },
+    { "province": "can_tho", "pm25": 24.7, "pm10": 39.0, "no2": 12.2, "so2": 3.7, "o3": 21.9, "co": 0.44, "aqi": 45, "status": "good" },
+    { "province": "an_giang", "pm25": 21.7, "pm10": 44.2, "no2": 7.3, "so2": 1.9, "o3": 20.1, "co": 0.45, "aqi": 49, "status": "good" },
+    { "province": "kien_giang", "pm25": 21.5, "pm10": 34.8, "no2": 6.4, "so2": 3.3, "o3": 21.4, "co": 0.41, "aqi": 47, "status": "good" },
+    { "province": "ca_mau", "pm25": 26.1, "pm10": 49.2, "no2": 12.7, "so2": 2.3, "o3": 23.4, "co": 0.49, "aqi": 53, "status": "good" }
+  ],
+  "series": {
+    "ha_noi": [
+      { "timestamp": "2025-01-02T05:00:00Z", "pm25": 54.8, "pm10": 71.2, "no2": 22.1, "aqi": 113 },
+      { "timestamp": "2025-01-02T06:00:00Z", "pm25": 56.7, "pm10": 73.4, "no2": 23.0, "aqi": 117 },
+      { "timestamp": "2025-01-02T07:00:00Z", "pm25": 58.6, "pm10": 75.3, "no2": 23.8, "aqi": 121 },
+      { "timestamp": "2025-01-02T08:00:00Z", "pm25": 60.1, "pm10": 77.0, "no2": 24.4, "aqi": 124 },
+      { "timestamp": "2025-01-02T09:00:00Z", "pm25": 61.3, "pm10": 78.4, "no2": 25.0, "aqi": 126 }
+    ],
+    "hai_phong": [
+      { "timestamp": "2025-01-02T05:00:00Z", "pm25": 50.8, "pm10": 69.8, "no2": 22.6, "aqi": 109 },
+      { "timestamp": "2025-01-02T06:00:00Z", "pm25": 52.4, "pm10": 72.0, "no2": 23.4, "aqi": 113 },
+      { "timestamp": "2025-01-02T07:00:00Z", "pm25": 54.0, "pm10": 73.6, "no2": 24.2, "aqi": 116 },
+      { "timestamp": "2025-01-02T08:00:00Z", "pm25": 55.6, "pm10": 75.1, "no2": 24.8, "aqi": 119 },
+      { "timestamp": "2025-01-02T09:00:00Z", "pm25": 57.2, "pm10": 76.5, "no2": 25.3, "aqi": 121 }
+    ],
+    "da_nang": [
+      { "timestamp": "2025-01-02T05:00:00Z", "pm25": 24.8, "pm10": 45.2, "no2": 10.1, "aqi": 55 },
+      { "timestamp": "2025-01-02T06:00:00Z", "pm25": 26.1, "pm10": 47.0, "no2": 10.5, "aqi": 58 },
+      { "timestamp": "2025-01-02T07:00:00Z", "pm25": 27.3, "pm10": 48.8, "no2": 10.9, "aqi": 60 },
+      { "timestamp": "2025-01-02T08:00:00Z", "pm25": 28.5, "pm10": 50.9, "no2": 11.2, "aqi": 62 },
+      { "timestamp": "2025-01-02T09:00:00Z", "pm25": 29.7, "pm10": 52.7, "no2": 11.6, "aqi": 63 }
+    ],
+    "ho_chi_minh": [
+      { "timestamp": "2025-01-02T05:00:00Z", "pm25": 27.4, "pm10": 38.1, "no2": 8.8, "aqi": 61 },
+      { "timestamp": "2025-01-02T06:00:00Z", "pm25": 28.7, "pm10": 39.5, "no2": 9.2, "aqi": 64 },
+      { "timestamp": "2025-01-02T07:00:00Z", "pm25": 29.9, "pm10": 40.8, "no2": 9.6, "aqi": 67 },
+      { "timestamp": "2025-01-02T08:00:00Z", "pm25": 31.2, "pm10": 41.9, "no2": 10.0, "aqi": 69 },
+      { "timestamp": "2025-01-02T09:00:00Z", "pm25": 32.3, "pm10": 43.0, "no2": 10.4, "aqi": 71 }
+    ],
+    "can_tho": [
+      { "timestamp": "2025-01-02T05:00:00Z", "pm25": 21.1, "pm10": 34.6, "no2": 10.5, "aqi": 40 },
+      { "timestamp": "2025-01-02T06:00:00Z", "pm25": 22.0, "pm10": 35.8, "no2": 10.9, "aqi": 41 },
+      { "timestamp": "2025-01-02T07:00:00Z", "pm25": 22.9, "pm10": 36.9, "no2": 11.4, "aqi": 42 },
+      { "timestamp": "2025-01-02T08:00:00Z", "pm25": 23.8, "pm10": 37.9, "no2": 11.8, "aqi": 44 },
+      { "timestamp": "2025-01-02T09:00:00Z", "pm25": 24.7, "pm10": 39.0, "no2": 12.2, "aqi": 45 }
+    ]
+  }
+}
