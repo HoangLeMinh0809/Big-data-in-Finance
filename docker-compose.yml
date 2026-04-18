@@ -1,6 +1,6 @@
 # =============================================================================
-# Big Data Pipeline Template - Stock Data Processing
-# Luồng: Raw Excel → Python Ingest → Kafka → Spark Streaming → HDFS (Parquet)
+# Atmospheric Intelligence System (AIS)
+# Luồng: Weather/OpenAQ/Sentinel-5P → Python Ingest → Kafka → Spark → Iceberg/HDFS → Cassandra
 # =============================================================================
 
 services:
@@ -146,7 +146,7 @@ services:
       - bigdata-net
 
   # ---------------------------------------------------------------------------
-  # PYTHON INGEST — đọc file Excel, chuẩn hóa, gửi vào Kafka
+  # PYTHON INGEST — chạy producer Weather/OpenAQ và gửi events vào Kafka
   # ---------------------------------------------------------------------------
   ingest:
     build:
@@ -161,15 +161,15 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: stock-prices-daily
-      # Số lượng công ty cào (từ đầu CSV), mặc định 50
+      # Số lượng bản ghi/đối tượng nguồn cần thu thập, mặc định 50
       NUM_COMPANIES: "5"
       # Lookback: lấy dữ liệu bao nhiêu ngày về trước, mặc định 30
       LOOKBACK_DAYS: "30"
       # Delay giữa mỗi message gửi Kafka (ms)
       SEND_DELAY_MS: "10"
-      # Delay giữa mỗi request tới CafeF (ms), tránh bị rate-limit
+      # Delay giữa mỗi request tới nguồn dữ liệu (ms), tránh bị rate-limit
       API_DELAY_MS: "500"
-      # Khoảng cách giữa các vòng cào (giây). 86400=1 ngày, 0=chạy 1 lần
+      # Khoảng cách giữa các vòng thu thập (giây). 86400=1 ngày, 0=chạy 1 lần
       SCRAPE_INTERVAL_SECONDS: "86400"
     networks:
       - bigdata-net
@@ -231,6 +231,191 @@ services:
     networks:
       - bigdata-net
 
+  # ---------------------------------------------------------------------------
+  # CASSANDRA — serving layer cho truy van latency thap
+  # ---------------------------------------------------------------------------
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    hostname: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: ais-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 256M
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW METADATA DB (Postgres)
+  # ---------------------------------------------------------------------------
+  airflow-postgres:
+    image: postgres:14
+    container_name: airflow-postgres
+    hostname: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW INIT — migrate DB va tao admin user
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
+    container_name: airflow-init
+    hostname: airflow-init
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: >
+      bash -c "airflow db migrate &&
+      airflow users create
+      --username admin
+      --firstname Air
+      --lastname Flow
+      --role Admin
+      --email admin@example.com
+      --password admin"
+    networks:
+      - bigdata-net
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW WEBSERVER
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: webserver
+    ports:
+      - "8088:8080"
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8080/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW SCHEDULER
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: scheduler
+    networks:
+      - bigdata-net
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW TRIGGERER
+  # ---------------------------------------------------------------------------
+  airflow-triggerer:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
+    container_name: airflow-triggerer
+    hostname: airflow-triggerer
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    user: "50000:0"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW_UID: 50000
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: triggerer
+    networks:
+      - bigdata-net
+
 # =============================================================================
 # NETWORKS
 # =============================================================================
@@ -246,4 +431,8 @@ volumes:
   namenode_data:
     driver: local
   datanode_data:
+    driver: local
+  cassandra_data:
+    driver: local
+  airflow_postgres_data:
     driver: local
