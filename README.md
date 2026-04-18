@@ -1,6 +1,6 @@
 # Atmospheric Intelligence System (AIS)
 
-Pipeline Big Data cho dữ liệu khí quyển: WeatherAPI history, OpenAQ hourly và Sentinel-5P. Hệ thống dùng Kafka làm message bus, Spark Structured Streaming để xử lý luồng dữ liệu, Iceberg trên HDFS làm data lake table, Cassandra làm serving layer, Airflow để điều phối và Monitoring UI để theo dõi trạng thái.
+Pipeline Big Data cho dữ liệu khí quyển: WeatherAPI history, OpenAQ hourly, Sentinel-5P và MAIAC. Kiến trúc vận hành chuẩn: Python ingest adapters -> Kafka -> Spark (realtime/batch) -> Iceberg/HDFS -> Cassandra, với Airflow chỉ giữ vai trò batch orchestration.
 
 ## Mục lục
 
@@ -25,7 +25,7 @@ OpenAQ CSV/API  ──┼──> Python Ingest ──> Kafka ──> Spark Struc
 Sentinel-5P API ──┘                               │
                                                    └──> Spark batch load ──> Cassandra
 
-Airflow điều phối các bước ingest, streaming và load serving.
+Airflow điều phối các bước batch ingest và batch load serving (khong chay long-running realtime jobs).
 Monitoring UI đọc Kafka/HDFS để theo dõi throughput và trạng thái lưu trữ.
 ```
 
@@ -37,8 +37,7 @@ Monitoring UI đọc Kafka/HDFS để theo dõi throughput và trạng thái lư
 | `kafka` | Message broker nhận events từ ingest và cung cấp cho Spark |
 | `namenode`, `datanode` | HDFS storage cho warehouse Iceberg và checkpoint |
 | `spark-master`, `spark-worker` | Chạy Spark Structured Streaming và batch jobs |
-| `ingest` | Container Python dùng để chạy `ingest_weather.py` và `openaq_ingest.py` |
-| `sentinel5p-ingest` | Tải Sentinel-5P từ CDSE, tính summary và gửi vào Kafka |
+| `ingest`, `openaq-ingest`, `sentinel5p-ingest`, `maiac-ingest` | Python source adapters đẩy dữ liệu về Kafka |
 | `cassandra` | Serving layer cho truy vấn latency thấp |
 | `airflow-*` | Airflow metadata DB, webserver, scheduler, triggerer và DAG orchestration |
 | `monitoring-ui` | Dashboard theo dõi Kafka, HDFS/DataNode và pipeline status |
@@ -53,16 +52,19 @@ Atmospheric_intelligence_sys---AIS/
 ├── airflow/
 │   ├── Dockerfile
 │   └── dags/
-│       └── ais_pipeline_dag.py     # DAG weather/OpenAQ -> Iceberg -> Cassandra
+│       └── ais_pipeline_dag.py     # DAG batch orchestration cho ingest + load Cassandra
 ├── ingest/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── ingest_weather.py           # Weather history producer
 │   ├── openaq_ingest.py            # OpenAQ hourly producer
-│   └── sentinel5p_ingest.py        # Sentinel-5P summary producer
+│   ├── sentinel5p_ingest.py        # Sentinel-5P summary producer
+│   └── maiac_ingest.py             # MAIAC metadata producer
 ├── spark_jobs/
-│   ├── weather_streaming.py        # Kafka weather-history -> Iceberg
+│   ├── weather_streaming.py        # Kafka weather_history -> Iceberg
 │   ├── openaq_hourly_streaming.py  # Kafka openaq-hourly -> Iceberg
+│   ├── sentinel5p_summary_streaming.py # Kafka sentinel5p-summary -> HDFS parquet
+│   ├── maiac_summary_streaming.py  # Kafka maiac-summary -> HDFS parquet
 │   └── iceberg_to_cassandra.py     # Iceberg -> Cassandra serving tables
 ├── data/
 │   ├── weather/                    # Weather history JSON theo tỉnh/thành
@@ -72,7 +74,7 @@ Atmospheric_intelligence_sys---AIS/
 ├── scripts/                        # Helper scripts tạo topic, submit Spark, health check
 ├── hadoop/
 │   └── hadoop.env                  # Cấu hình Hadoop/HDFS
-└── checkpoints/                    # Local fallback checkpoint placeholder
+└── checkpoints/                    # Runtime state/checkpoint
 ```
 
 ---
@@ -101,6 +103,8 @@ File `docker-compose.yml` chạy các service trên network chung `bigdata-net`.
 - `cassandra_data`: Cassandra data
 - `airflow_postgres_data`: Airflow metadata database
 
+NiFi khong con nam trong runtime path chinh. Folder `nifi/` duoc giu lai cho future work.
+
 ---
 
 ## 4. Ingest services
@@ -108,7 +112,7 @@ File `docker-compose.yml` chạy các service trên network chung `bigdata-net`.
 ### Weather history
 
 - File: `ingest/ingest_weather.py`
-- Kafka topic mặc định: `weather-history`
+- Kafka topic mặc định: `weather_history`
 - Input:
   - Local JSON trong `./data/weather/<province>/<date>.json`, hoặc
   - WeatherAPI history khi cấu hình mode/API key phù hợp
@@ -137,8 +141,15 @@ File `docker-compose.yml` chạy các service trên network chung `bigdata-net`.
 
 | Job | Kafka topic | Iceberg table | Checkpoint |
 |-----|-------------|---------------|------------|
-| `weather_streaming.py` | `weather-history` | `ais.weather.weather_history_bronze` | `hdfs://namenode:9000/checkpoints/weather_history/` |
+| `weather_streaming.py` | `weather_history` | `ais.weather.weather_history_bronze` | `hdfs://namenode:9000/checkpoints/weather_history/` |
 | `openaq_hourly_streaming.py` | `openaq-hourly` | `ais.air_quality.openaq_hourly_bronze` | `hdfs://namenode:9000/checkpoints/openaq_hourly/` |
+
+Summary streaming jobs (realtime path):
+
+| Job | Kafka topic | Sink |
+|-----|-------------|------|
+| `sentinel5p_summary_streaming.py` | `sentinel5p-summary` | `hdfs://namenode:9000/data/sentinel5p_summary/` |
+| `maiac_summary_streaming.py` | `maiac-summary` | `hdfs://namenode:9000/data/maiac_summary/` |
 
 Iceberg warehouse:
 
@@ -180,9 +191,10 @@ UI hữu ích:
 ### 2. Tạo Kafka topics
 
 ```bash
-docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic weather-history --if-not-exists
+docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic weather_history --if-not-exists
 docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic openaq-hourly --if-not-exists
 docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic sentinel5p-summary --if-not-exists
+docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic maiac-summary --if-not-exists
 docker exec kafka kafka-topics --list --bootstrap-server kafka:9092
 ```
 
@@ -199,15 +211,16 @@ docker exec namenode hdfs dfs -chmod -R 777 /checkpoints
 ### 4. Chạy ingest
 
 ```bash
-docker-compose build ingest
-docker-compose run --rm -v ./data:/data ingest python -u ingest_weather.py
-docker-compose run --rm -v ./data:/data ingest python -u openaq_ingest.py
+docker compose build ingest openaq-ingest sentinel5p-ingest maiac-ingest
+docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 ingest
+docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 openaq-ingest
 ```
 
-Sentinel-5P có thể chạy riêng khi đã cấu hình CDSE credentials:
+Sentinel-5P va MAIAC co the chay rieng:
 
 ```bash
-docker-compose up --build sentinel5p-ingest
+docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 sentinel5p-ingest
+docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=30 maiac-ingest
 ```
 
 ### 5. Submit Spark jobs
@@ -215,6 +228,8 @@ docker-compose up --build sentinel5p-ingest
 ```bash
 bash scripts/submit_spark.sh weather
 bash scripts/submit_spark.sh openaq
+bash scripts/submit_spark.sh sentinel5p
+bash scripts/submit_spark.sh maiac
 ```
 
 Sau khi có dữ liệu trong Iceberg, load sang Cassandra:
@@ -237,7 +252,7 @@ Airflow UI: http://localhost:8088
 - Username: `admin`
 - Password: `admin`
 
-DAG chính: `ais_weather_openaq_pipeline`
+DAG chính: `ais_batch_orchestration`
 
 ### 7. Mở Monitoring UI
 
@@ -254,10 +269,12 @@ Monitoring UI: http://localhost:8501
 ### Kafka
 
 ```bash
-docker exec kafka kafka-run-class kafka.tools.GetOffsetShell --broker-list kafka:9092 --topic weather-history --time -1
+docker exec kafka kafka-run-class kafka.tools.GetOffsetShell --broker-list kafka:9092 --topic weather_history --time -1
 docker exec kafka kafka-run-class kafka.tools.GetOffsetShell --broker-list kafka:9092 --topic openaq-hourly --time -1
+docker exec kafka kafka-run-class kafka.tools.GetOffsetShell --broker-list kafka:9092 --topic sentinel5p-summary --time -1
+docker exec kafka kafka-run-class kafka.tools.GetOffsetShell --broker-list kafka:9092 --topic maiac-summary --time -1
 
-docker exec kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic weather-history --from-beginning --max-messages 5
+docker exec kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic weather_history --from-beginning --max-messages 5
 docker exec kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic openaq-hourly --from-beginning --max-messages 5
 ```
 
@@ -271,6 +288,8 @@ Mở Spark UI tại http://localhost:8080 và kiểm tra các application:
 
 - `WeatherHistory_Streaming`
 - `OpenAQHourly_Streaming`
+- `Sentinel5PSummary_Streaming`
+- `MAIACSummary_Streaming`
 - `IcebergToCassandra_Weather`
 - `IcebergToCassandra_OpenAQ`
 

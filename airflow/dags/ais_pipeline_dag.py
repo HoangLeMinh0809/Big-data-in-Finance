@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
-DAG_ID = "ais_streaming_pipeline"
+DAG_ID = "ais_batch_orchestration"
 
 DEFAULT_ARGS = {
     "owner": "airflow",
@@ -60,14 +60,14 @@ with DAG(
     start_date=datetime(2026, 4, 13),
     schedule=None,
     catchup=False,
-    tags=["ais", "iceberg", "streaming"],
-    description="Orchestrate weather and openaq ingest -> Spark Iceberg sink",
+    tags=["ais", "batch", "airflow"],
+    description="Batch orchestration for ingest adapters and one-shot Spark/Cassandra loads",
 ) as dag:
     ensure_weather_topic = BashOperator(
         task_id="ensure_weather_topic",
         bash_command=(
             "set -euo pipefail\n"
-            "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic weather-history --if-not-exists"
+                "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic weather_history --if-not-exists"
         ),
     )
 
@@ -79,14 +79,52 @@ with DAG(
         ),
     )
 
+    ensure_sentinel5p_topic = BashOperator(
+        task_id="ensure_sentinel5p_topic",
+        bash_command=(
+            "set -euo pipefail\n"
+            "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic sentinel5p-summary --if-not-exists"
+        ),
+    )
+
+    ensure_maiac_topic = BashOperator(
+        task_id="ensure_maiac_topic",
+        bash_command=(
+            "set -euo pipefail\n"
+            "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic maiac-summary --if-not-exists"
+        ),
+    )
+
     run_weather_ingest = BashOperator(
         task_id="run_weather_ingest",
-        bash_command="set -euo pipefail\ndocker exec ingest python -u ingest_weather.py",
+        bash_command=(
+            "set -euo pipefail\n"
+            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 ingest python -u ingest_weather.py"
+        ),
     )
 
     run_openaq_ingest = BashOperator(
         task_id="run_openaq_ingest",
-        bash_command="set -euo pipefail\ndocker exec ingest python -u openaq_ingest.py",
+        bash_command=(
+            "set -euo pipefail\n"
+            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 openaq-ingest python -u openaq_ingest.py"
+        ),
+    )
+
+    run_sentinel5p_ingest = BashOperator(
+        task_id="run_sentinel5p_ingest",
+        bash_command=(
+            "set -euo pipefail\n"
+            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 sentinel5p-ingest python -u sentinel5p_ingest.py"
+        ),
+    )
+
+    run_maiac_ingest = BashOperator(
+        task_id="run_maiac_ingest",
+        bash_command=(
+            "set -euo pipefail\n"
+            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=30 maiac-ingest python -u maiac_ingest.py"
+        ),
     )
 
     run_weather_spark = BashOperator(
@@ -123,8 +161,22 @@ with DAG(
         task_id="pipeline_done",
         bash_command=(
             "set -euo pipefail\n"
-            "echo 'AIS pipeline finished: weather-history and openaq-hourly loaded into Iceberg and Cassandra'"
+            "echo 'AIS batch orchestration finished. Realtime path remains Kafka + Spark long-running jobs.'"
         ),
     )
 
-    [ensure_weather_topic, ensure_openaq_topic] >> [run_weather_ingest, run_openaq_ingest] >> [run_weather_spark, run_openaq_spark] >> ensure_cassandra_schema >> [load_weather_cassandra, load_openaq_cassandra] >> pipeline_done
+    [
+        ensure_weather_topic,
+        ensure_openaq_topic,
+        ensure_sentinel5p_topic,
+        ensure_maiac_topic,
+    ] >> [
+        run_weather_ingest,
+        run_openaq_ingest,
+        run_sentinel5p_ingest,
+        run_maiac_ingest,
+    ]
+
+    [run_weather_ingest, run_openaq_ingest] >> [run_weather_spark, run_openaq_spark]
+    [run_weather_spark, run_openaq_spark] >> ensure_cassandra_schema
+    ensure_cassandra_schema >> [load_weather_cassandra, load_openaq_cassandra] >> pipeline_done

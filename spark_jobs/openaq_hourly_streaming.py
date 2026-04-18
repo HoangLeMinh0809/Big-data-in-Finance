@@ -52,6 +52,10 @@ OPENAQ_SCHEMA = StructType([
     StructField("coverage_pct", DoubleType(), True),
     StructField("source", StringType(), True),
     StructField("ingest_time", StringType(), True),
+    StructField("window_mode", StringType(), True),
+    StructField("window_start_utc", StringType(), True),
+    StructField("window_end_utc", StringType(), True),
+    StructField("window_now_utc", StringType(), True),
     StructField("event_id", StringType(), True),
 ])
 
@@ -92,6 +96,9 @@ def main():
     final_df = (
         parsed_df
         .withColumn("event_time", to_timestamp(col("datetime_utc")))
+        .withColumn("window_start_utc", to_timestamp(col("window_start_utc")))
+        .withColumn("window_end_utc", to_timestamp(col("window_end_utc")))
+        .withColumn("window_now_utc", to_timestamp(col("window_now_utc")))
         .withColumn("year", spark_year(col("event_time")))
         .withColumn("month", spark_month(col("event_time")))
         .withColumn("day", dayofmonth(col("event_time")))

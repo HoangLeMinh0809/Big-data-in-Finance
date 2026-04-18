@@ -1,15 +1,29 @@
-import json
+"""
+Sentinel-5P Product Metadata Ingest
+====================================
+Fetches Sentinel-5P product metadata from Copernicus Data Space using their ODATA API
+and publishes summary events to Kafka without downloading full files.
+
+Products supported: NO2, CO, O3, SO2, CH4, AER
+Window modes: batch (historical) or realtime (continuous/polling)
+"""
+
 import logging
 import os
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
-import numpy as np
 import requests
-import netCDF4 as nc
-from kafka import KafkaProducer
-from kafka.errors import NoBrokerAvailable
+
+from kafka_utils import create_kafka_producer as create_shared_kafka_producer, send_event
+from window_utils import (
+    build_default_window_config,
+    parse_bool,
+    resolve_window,
+    to_utc_iso,
+    utc_now,
+    write_window_state,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,10 +32,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sentinel5p_ingest")
 
+# =============================================================================
+# Copernicus Data Space API endpoints
+# =============================================================================
 AUTH_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 ODATA_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
-DOWNLOAD_URL = "https://download.dataspace.copernicus.eu/odata/v1/Products"
 
+# =============================================================================
+# Product definitions for Sentinel-5P
+# =============================================================================
 PRODUCTS_DEF = {
     "NO2": {
         "collection": "SENTINEL-5P",
@@ -67,20 +86,18 @@ PRODUCTS_DEF = {
     },
 }
 
+# =============================================================================
+# Configuration from environment
+# =============================================================================
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "sentinel5p-summary")
 
-CDSE_USERNAME = os.getenv("CDSE_USERNAME", "")
-CDSE_PASSWORD = os.getenv("CDSE_PASSWORD", "")
+CDSE_USERNAME = os.getenv("CDSE_USERNAME", "").strip()
+CDSE_PASSWORD = os.getenv("CDSE_PASSWORD", "").strip()
 
-DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "/data/sentinel5p_data"))
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-bbox_raw = os.getenv("BBOX", "100,8,110,24")
-BBOX = [float(x.strip()) for x in bbox_raw.split(",")]
-
-DATE_END = os.getenv("DATE_END") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-DATE_START = os.getenv("DATE_START") or (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+# Parse bounding box: min_lon,min_lat,max_lon,max_lat
+BBOX_RAW = os.getenv("BBOX", "100,8,110,24")
+BBOX = [float(x.strip()) for x in BBOX_RAW.split(",")]
 
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "1"))
 PRODUCTS = [
@@ -89,175 +106,56 @@ PRODUCTS = [
     if p.strip()
 ]
 
-# -----------------------------------------------------------------------------
-# Ingest thresholds
-# -----------------------------------------------------------------------------
-# QA threshold by product (requested): NO2+SO2=0.75; others=0.5
-QA_THRESHOLDS = {
-    "NO2": 0.75,
-    "SO2": 0.75,
-    "CO": 0.5,
-    "O3": 0.5,
-    "AER": 0.5,
-    "CH4": 0.5,
-}
+REQUEST_TIMEOUT_SEC = int(os.getenv("REQUEST_TIMEOUT_SEC", "30"))
+REQUEST_DELAY_SEC = float(os.getenv("REQUEST_DELAY_SEC", "0.2"))
+SEND_DELAY_MS = int(os.getenv("SEND_DELAY_MS", "0"))
 
-# Hotspot configuration: emit top-N pixels above threshold for selected products
-HOTSPOT_PRODUCTS = {"AER", "CO"}
-HOTSPOT_THRESHOLDS = {
-    # These are conservative defaults; override via env if needed.
-    "AER": float(os.getenv("AER_HOTSPOT_THRESHOLD", "2.0")),
-    "CO": float(os.getenv("CO_HOTSPOT_THRESHOLD", "0.05")),
-}
-HOTSPOT_TOP_N = int(os.getenv("HOTSPOT_TOP_N", "200"))
+WINDOW_CONFIG = build_default_window_config(
+    mode=os.getenv("WINDOW_MODE", "batch"),
+    batch_lookback_days=int(os.getenv("BATCH_LOOKBACK_DAYS", "7")),
+    realtime_lookback_minutes=int(os.getenv("REALTIME_LOOKBACK_MINUTES", "10")),
+    poll_seconds=int(os.getenv("REALTIME_POLL_SECONDS", "600")),
+    continuous=parse_bool(os.getenv("REALTIME_CONTINUOUS", "false"), default=False),
+    start_override=os.getenv("WINDOW_START_UTC", ""),
+    end_override=os.getenv("WINDOW_END_UTC", ""),
+    state_file=os.getenv("WINDOW_STATE_FILE", "/tmp/sentinel5p_window_state.json"),
+)
 
 
+# =============================================================================
+# Utility functions
+# =============================================================================
 def get_access_token(username: str, password: str) -> str:
+    """Authenticate with Copernicus Data Space and get access token."""
     resp = requests.post(
         AUTH_URL,
         data={
-            "client_id": "cdse-public",
             "username": username,
             "password": password,
+            "client_id": "cdse-public",
             "grant_type": "password",
         },
-        timeout=30,
+        timeout=REQUEST_TIMEOUT_SEC,
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
 
 
-def _pick_group_and_var(ds: nc.Dataset, product_key: str):
-    p = PRODUCTS_DEF[product_key]
-    group = ds.groups.get(p["group"])
-    if group is None:
-        for g in ds.groups.values():
-            if p["variable"] in g.variables:
-                group = g
-                break
-    if group is None or p["variable"] not in group.variables:
-        raise KeyError(f"Variable '{p['variable']}' not found")
-    return group, group.variables[p["variable"]]
+def to_odata_datetime(dt: datetime) -> str:
+    """Format datetime for ODATA filter (Copernicus API expects this format)."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _find_lat_lon(group: nc.Group):
-    """Best-effort lookup lat/lon arrays inside the same group.
-
-    Many S5P L2 products store geolocation in PRODUCT group.
-    Common names include: latitude/longitude.
+def search_products(
+    product_key: str, token: str, start_utc: datetime, end_utc: datetime
+) -> list[dict]:
     """
-    lat = None
-    lon = None
-    for cand in ("latitude", "lat"):
-        if cand in group.variables:
-            lat = group.variables[cand]
-            break
-    for cand in ("longitude", "lon"):
-        if cand in group.variables:
-            lon = group.variables[cand]
-            break
-    return lat, lon
-
-
-def _apply_masks(
-    var: np.ndarray,
-    var_nc,
-    group: nc.Group,
-    product_key: str,
-    bbox=None,
-):
-    # mask fill values
-    fill = getattr(var_nc, "_FillValue", None)
-    if fill is not None:
-        var[var == fill] = np.nan
-    var[var < -1e30] = np.nan
-
-    # QA mask (product-specific threshold)
-    if "qa_value" in group.variables:
-        qa = group.variables["qa_value"][0].data
-        thr = float(QA_THRESHOLDS.get(product_key, 0.5))
-        var[qa < thr] = np.nan
-
-    # BBOX crop (requested): read lat/lon then mask outside bbox
-    if bbox is not None:
-        lat_nc, lon_nc = _find_lat_lon(group)
-        if lat_nc is not None and lon_nc is not None:
-            lat = lat_nc[0].data.astype(float)
-            lon = lon_nc[0].data.astype(float)
-            lon_min, lat_min, lon_max, lat_max = bbox
-            inside = (
-                (lat >= lat_min)
-                & (lat <= lat_max)
-                & (lon >= lon_min)
-                & (lon <= lon_max)
-            )
-            var[~inside] = np.nan
-
-    return var
-
-
-def _extract_hotspots(
-    group: nc.Group,
-    var_nc,
-    var_masked: np.ndarray,
-    product_key: str,
-    bbox,
-):
-    """Return list[dict] hotspots: {lat, lon, value}.
-
-    Only for products in HOTSPOT_PRODUCTS.
+    Query Copernicus Data Space ODATA API for product granules in the given window.
+    Returns list of product entries (metadata only, not downloaded).
     """
-    if product_key not in HOTSPOT_PRODUCTS:
-        return []
-
-    threshold = float(HOTSPOT_THRESHOLDS.get(product_key, float("inf")))
-    if not np.isfinite(threshold):
-        return []
-
-    lat_nc, lon_nc = _find_lat_lon(group)
-    if lat_nc is None or lon_nc is None:
-        return []
-
-    lat = lat_nc[0].data.astype(float)
-    lon = lon_nc[0].data.astype(float)
-
-    # Candidate mask: finite and above threshold
-    mask = np.isfinite(var_masked) & (var_masked >= threshold)
-    if not mask.any():
-        return []
-
-    vals = var_masked[mask]
-    lats = lat[mask]
-    lons = lon[mask]
-
-    # Take top-N by value
-    if vals.size > HOTSPOT_TOP_N:
-        idx = np.argpartition(vals, -HOTSPOT_TOP_N)[-HOTSPOT_TOP_N:]
-        # sort desc
-        idx = idx[np.argsort(vals[idx])[::-1]]
-        vals = vals[idx]
-        lats = lats[idx]
-        lons = lons[idx]
-    else:
-        order = np.argsort(vals)[::-1]
-        vals = vals[order]
-        lats = lats[order]
-        lons = lons[order]
-
-    hotspots = []
-    for la, lo, va in zip(lats.tolist(), lons.tolist(), vals.tolist()):
-        hotspots.append({
-            "lat": float(la),
-            "lon": float(lo),
-            "value": float(va),
-        })
-
-    return hotspots
-
-
-def search_products(product_key: str, token: str) -> list[dict]:
     p = PRODUCTS_DEF[product_key]
 
+    # WKT polygon for bounding box (Copernicus requires this format)
     wkt = (
         "POLYGON(("
         f"{BBOX[0]} {BBOX[1]},"
@@ -273,148 +171,176 @@ def search_products(product_key: str, token: str) -> list[dict]:
             f"Collection/Name eq '{p['collection']}' and "
             f"contains(Name,'{p['type_filter'].strip()}') and "
             f"OData.CSC.Intersects(area=geography'SRID=4326;{wkt}') and "
-            f"ContentDate/Start ge {DATE_START}T00:00:00.000Z and "
-            f"ContentDate/Start le {DATE_END}T23:59:59.000Z"
+            f"ContentDate/Start ge {to_odata_datetime(start_utc)} and "
+            f"ContentDate/Start le {to_odata_datetime(end_utc)}"
         ),
         "$orderby": "ContentDate/Start desc",
         "$top": MAX_RESULTS,
     }
 
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(ODATA_URL, params=params, headers=headers, timeout=(10, 60))
-    resp.raise_for_status()
-    return resp.json().get("value", [])
-
-
-def download_product(product: dict, token: str) -> Path:
-    filename = product["Name"] + ".nc"
-    dest = DOWNLOAD_DIR / filename
-    if dest.exists():
-        return dest
-
-    url = f"{DOWNLOAD_URL}({product['Id']})/$value"
-    headers = {"Authorization": f"Bearer {token}"}
-
-    # For big files (hundreds of MB): short connect timeout, no read timeout.
-    with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
-        r.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                if chunk:
-                    f.write(chunk)
-
-    return dest
-
-
-def compute_stats(nc_path: Path, product_key: str) -> dict:
-    p = PRODUCTS_DEF[product_key]
-    ds = nc.Dataset(nc_path)
 
     try:
-        group, var_nc = _pick_group_and_var(ds, product_key)
-
-        # Read first time slice [0]
-        var = var_nc[0].data.astype(float)
-
-        # Apply masks + bbox crop before computing stats
-        var = _apply_masks(var, var_nc, group, product_key, bbox=BBOX)
-
-        valid = np.isfinite(var)
-        valid_pct = float(valid.sum() / var.size * 100.0) if var.size else 0.0
-
-        stats = {
-            "min": float(np.nanmin(var)) if valid.any() else None,
-            "max": float(np.nanmax(var)) if valid.any() else None,
-            "mean": float(np.nanmean(var)) if valid.any() else None,
-            "valid_pct": valid_pct,
-        }
-
-        # Hotspots for AER/CO (requested)
-        hotspots = _extract_hotspots(group, var_nc, var, product_key, bbox=BBOX)
-        if hotspots:
-            stats["hotspots"] = hotspots
-
-        return stats
-    finally:
-        ds.close()
+        resp = requests.get(
+            ODATA_URL, params=params, headers=headers, timeout=REQUEST_TIMEOUT_SEC
+        )
+        resp.raise_for_status()
+        return resp.json().get("value", [])
+    except Exception as e:
+        logger.error(f"Error querying ODATA for {product_key}: {e}")
+        return []
 
 
-def create_kafka_producer(max_retries: int = 10, retry_delay: int = 5) -> KafkaProducer:
-    for attempt in range(1, max_retries + 1):
-        try:
-            producer = KafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
-                key_serializer=lambda k: k.encode("utf-8") if k else None,
-                acks="all",
-                retries=3,
-                max_block_ms=30000,
-            )
-            logger.info(f"Kafka connected (attempt {attempt})")
-            return producer
-        except NoBrokerAvailable:
-            logger.warning(f"Kafka not ready (attempt {attempt}/{max_retries}), wait {retry_delay}s")
-            time.sleep(retry_delay)
+def run_once(producer) -> int:
+    """
+    Execute one ingest cycle: resolve window, search for each product,
+    and publish events to Kafka. Returns count of events sent.
+    """
+    window = resolve_window(WINDOW_CONFIG)
+    ingest_time = utc_now().isoformat()
 
-    raise RuntimeError("Cannot connect to Kafka")
+    logger.info(
+        f"Window UTC: {window.start_utc.isoformat()} -> {window.end_utc.isoformat()} "
+        f"(mode={WINDOW_CONFIG.mode})"
+    )
 
-
-def main():
     if not CDSE_USERNAME or not CDSE_PASSWORD:
-        raise RuntimeError("Missing CDSE_USERNAME / CDSE_PASSWORD env vars")
+        logger.error("Missing CDSE_USERNAME / CDSE_PASSWORD env vars")
+        return 0
 
-    logger.info("Sentinel-5P ingest (summary)")
-    logger.info(f"  Products:    {','.join(PRODUCTS)}")
-    logger.info(f"  Date range:  {DATE_START} -> {DATE_END}")
-    logger.info(f"  BBOX:        {BBOX}")
-    logger.info(f"  Download dir:{DOWNLOAD_DIR}")
-    logger.info(f"  Kafka topic: {KAFKA_TOPIC}")
-
-    token = get_access_token(CDSE_USERNAME, CDSE_PASSWORD)
-    producer = create_kafka_producer()
-    ingest_time = datetime.now(timezone.utc).isoformat()
+    try:
+        token = get_access_token(CDSE_USERNAME, CDSE_PASSWORD)
+    except Exception as e:
+        logger.error(f"Failed to get access token: {e}")
+        return 0
 
     sent = 0
+    window_start = to_utc_iso(window.start_utc)
+    window_end = to_utc_iso(window.end_utc)
+    window_now = to_utc_iso(window.now_utc)
+
     for idx, product_key in enumerate(PRODUCTS, 1):
         if product_key not in PRODUCTS_DEF:
             logger.warning(f"Unknown product key: {product_key}, skip")
             continue
 
-        items = search_products(product_key, token)
+        logger.info(f"[{idx}/{len(PRODUCTS)}] Searching {product_key}...")
+        items = search_products(product_key, token, window.start_utc, window.end_utc)
+
         if not items:
-            logger.warning(f"No product found for {product_key}")
+            logger.info(f"  No products found for {product_key}")
             continue
 
-        # take newest
+        # Take only the first (most recent) product
         item = items[0]
-        nc_path = download_product(item, token)
-        stats = compute_stats(nc_path, product_key)
+        product_name = item.get("Name", "unknown")
+        product_id = item.get("Id", "unknown")
+        content_start = (item.get("ContentDate") or {}).get("Start")
+        content_end = (item.get("ContentDate") or {}).get("End")
 
-        event_id = f"s5p_{product_key}_{item.get('Id')}_{DATE_START}_{DATE_END}".replace(" ", "")
+        event_id = f"s5p_{product_key}_{product_id}_{window_start}_{window_end}".replace(
+            " ", ""
+        )
+
         event = {
             "product": product_key,
             "collection": PRODUCTS_DEF[product_key]["collection"],
-            "content_start": (item.get("ContentDate") or {}).get("Start"),
-            "content_end": (item.get("ContentDate") or {}).get("End"),
+            "content_start": content_start,
+            "content_end": content_end,
             "bbox": BBOX,
-            "file_name": nc_path.name,
-            "stats": stats,
+            "product_name": product_name,
+            "product_id": product_id,
             "unit": PRODUCTS_DEF[product_key]["unit"],
             "ingest_time": ingest_time,
+            "window_mode": WINDOW_CONFIG.mode,
+            "window_start_utc": window_start,
+            "window_end_utc": window_end,
+            "window_now_utc": window_now,
             "event_id": event_id,
             "source": "cdse",
         }
 
-        producer.send(KAFKA_TOPIC, key=event_id, value=event)
-        sent += 1
-        logger.info(f"[{idx}/{len(PRODUCTS)}] sent {product_key}: {stats}")
+        if send_event(
+            producer=producer,
+            topic=KAFKA_TOPIC,
+            event=event,
+            logger=logger,
+            key_field="event_id",
+            wait_for_ack=False,
+        ):
+            sent += 1
+            logger.info(f"  ✓ Sent {product_key}: {product_name}")
+        else:
+            logger.warning(f"  ✗ Failed to send {product_key}")
 
-        # refresh token every 2 products
+        time.sleep(REQUEST_DELAY_SEC)
+
+        # Refresh token every 2 products to avoid expiration
         if idx % 2 == 0:
-            token = get_access_token(CDSE_USERNAME, CDSE_PASSWORD)
+            try:
+                token = get_access_token(CDSE_USERNAME, CDSE_PASSWORD)
+            except Exception as e:
+                logger.warning(f"Failed to refresh token: {e}")
+
+        if SEND_DELAY_MS > 0:
+            time.sleep(SEND_DELAY_MS / 1000.0)
+
+    # Write state for resumption on error
+    write_window_state(
+        WINDOW_CONFIG.state_file,
+        source="sentinel5p",
+        config=WINDOW_CONFIG,
+        window=window,
+        extra={"topic": KAFKA_TOPIC, "products": PRODUCTS, "sent": sent},
+    )
+
+    return sent
+
+
+def main():
+    """Main entry point: loop over window(s) and ingest."""
+    logger.info("=" * 70)
+    logger.info("Sentinel-5P Product Metadata Ingest")
+    logger.info("=" * 70)
+    logger.info(f"Products:       {','.join(PRODUCTS)}")
+    logger.info(f"Window mode:    {WINDOW_CONFIG.mode}")
+    logger.info(f"BBOX:           {BBOX}")
+    logger.info(f"Kafka topic:    {KAFKA_TOPIC}")
+    logger.info(f"State file:     {WINDOW_CONFIG.state_file}")
+
+    if WINDOW_CONFIG.mode == "realtime":
+        logger.info(f"Realtime poll:  {WINDOW_CONFIG.poll_seconds}s")
+        logger.info(f"Continuous:     {WINDOW_CONFIG.continuous}")
+
+    producer = create_shared_kafka_producer(
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        logger=logger,
+        max_retries=10,
+        retry_delay=5,
+    )
+
+    loop_forever = WINDOW_CONFIG.mode == "realtime" and WINDOW_CONFIG.continuous
+    total_sent = 0
+
+    while True:
+        try:
+            sent = run_once(producer)
+            total_sent += sent
+            logger.info(f"Sent {sent} events in this cycle (total={total_sent})")
+        except Exception as e:
+            logger.error(f"Error in run_once: {e}", exc_info=True)
+
+        if not loop_forever:
+            break
+
+        logger.info(
+            f"Sleeping {WINDOW_CONFIG.poll_seconds}s before next realtime pull..."
+        )
+        time.sleep(WINDOW_CONFIG.poll_seconds)
 
     producer.flush()
-    logger.info(f"Done. Sent {sent} messages.")
+    producer.close()
+    logger.info(f"Done. Total sent: {total_sent} events.")
 
 
 if __name__ == "__main__":

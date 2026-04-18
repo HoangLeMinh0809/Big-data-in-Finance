@@ -9,5 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
-# Default command — chạy ingest service
-CMD ["python", "-u", "ingest.py"]
+# Default command — local demo friendly (weather JSON -> Kafka)
+CMD ["python", "-u", "ingest_weather.py"]

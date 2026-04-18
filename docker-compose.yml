@@ -146,7 +146,7 @@ services:
       - bigdata-net
 
   # ---------------------------------------------------------------------------
-  # PYTHON INGEST — chạy producer Weather/OpenAQ và gửi events vào Kafka
+  # PYTHON INGEST — source adapter chạy Weather và gửi events vào Kafka
   # ---------------------------------------------------------------------------
   ingest:
     build:
@@ -156,11 +156,20 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    volumes:
-      - ./company.xls.csv:/app/company.xls.csv:ro
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: stock-prices-daily
+      KAFKA_TOPIC: weather_history
+      SOURCE_MODE: ${WEATHER_SOURCE_MODE:-api}
+      WEATHER_API_KEY: ${WEATHER_API_KEY:-}
+      WEATHER_QUERY_LIST: "${WEATHER_QUERY_LIST:-}"
+      WINDOW_MODE: ${WEATHER_WINDOW_MODE:-batch}
+      BATCH_LOOKBACK_DAYS: ${WEATHER_BATCH_LOOKBACK_DAYS:-7}
+      REALTIME_LOOKBACK_MINUTES: ${WEATHER_REALTIME_LOOKBACK_MINUTES:-10}
+      REALTIME_CONTINUOUS: ${WEATHER_REALTIME_CONTINUOUS:-false}
+      REALTIME_POLL_SECONDS: ${WEATHER_REALTIME_POLL_SECONDS:-600}
+      WINDOW_START_UTC: "${WEATHER_WINDOW_START_UTC:-}"
+      WINDOW_END_UTC: "${WEATHER_WINDOW_END_UTC:-}"
+      WINDOW_STATE_FILE: /opt/checkpoints/runtime_state/weather_window_state.json
       # Số lượng bản ghi/đối tượng nguồn cần thu thập, mặc định 50
       NUM_COMPANIES: "5"
       # Lookback: lấy dữ liệu bao nhiêu ngày về trước, mặc định 30
@@ -171,6 +180,80 @@ services:
       API_DELAY_MS: "500"
       # Khoảng cách giữa các vòng thu thập (giây). 86400=1 ngày, 0=chạy 1 lần
       SCRAPE_INTERVAL_SECONDS: "86400"
+    volumes:
+      - ./checkpoints:/opt/checkpoints
+    command: ["python", "-u", "ingest_weather.py"]
+    networks:
+      - bigdata-net
+
+  # ---------------------------------------------------------------------------
+  # OPENAQ INGEST — source adapter OpenAQ hourly API -> Kafka
+  # ---------------------------------------------------------------------------
+  openaq-ingest:
+    build:
+      context: ./ingest
+      dockerfile: Dockerfile
+    container_name: openaq-ingest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: openaq-hourly
+      OPENAQ_API_KEY: ${OPENAQ_API_KEY:-}
+      WINDOW_MODE: ${OPENAQ_WINDOW_MODE:-batch}
+      BATCH_LOOKBACK_DAYS: ${OPENAQ_BATCH_LOOKBACK_DAYS:-7}
+      REALTIME_LOOKBACK_MINUTES: ${OPENAQ_REALTIME_LOOKBACK_MINUTES:-10}
+      REALTIME_CONTINUOUS: ${OPENAQ_REALTIME_CONTINUOUS:-false}
+      REALTIME_POLL_SECONDS: ${OPENAQ_REALTIME_POLL_SECONDS:-600}
+      WINDOW_START_UTC: "${OPENAQ_WINDOW_START_UTC:-}"
+      WINDOW_END_UTC: "${OPENAQ_WINDOW_END_UTC:-}"
+      WINDOW_STATE_FILE: /opt/checkpoints/runtime_state/openaq_window_state.json
+      MAX_LOCATIONS: "100"
+      REQUEST_DELAY_SEC: "0.35"
+      SEND_DELAY_MS: "0"
+    volumes:
+      - ./checkpoints:/opt/checkpoints
+    command: ["python", "-u", "openaq_ingest.py"]
+    networks:
+      - bigdata-net
+
+  # ---------------------------------------------------------------------------
+  # MAIAC INGEST — source adapter MODIS MAIAC granule metadata -> Kafka
+  # ---------------------------------------------------------------------------
+  maiac-ingest:
+    build:
+      context: ./ingest
+      dockerfile: Dockerfile
+    container_name: maiac-ingest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: maiac-summary
+      CMR_GRANULES_URL: https://cmr.earthdata.nasa.gov/search/granules.json
+      MAIAC_SHORT_NAME: ${MAIAC_SHORT_NAME:-MCD19A2}
+      MAIAC_VERSION: ${MAIAC_VERSION:-061}
+      MAIAC_BBOX: ${MAIAC_BBOX:-102,8,110,24}
+      MAIAC_PROVIDER: ${MAIAC_PROVIDER:-}
+      WINDOW_MODE: ${MAIAC_WINDOW_MODE:-batch}
+      BATCH_LOOKBACK_DAYS: ${MAIAC_BATCH_LOOKBACK_DAYS:-30}
+      REALTIME_LOOKBACK_MINUTES: ${MAIAC_REALTIME_LOOKBACK_MINUTES:-10}
+      REALTIME_CONTINUOUS: ${MAIAC_REALTIME_CONTINUOUS:-false}
+      REALTIME_POLL_SECONDS: ${MAIAC_REALTIME_POLL_SECONDS:-600}
+      WINDOW_START_UTC: "${MAIAC_WINDOW_START_UTC:-}"
+      WINDOW_END_UTC: "${MAIAC_WINDOW_END_UTC:-}"
+      WINDOW_STATE_FILE: /opt/checkpoints/runtime_state/maiac_window_state.json
+      PAGE_SIZE: "500"
+      MAX_PAGES: "50"
+      MAX_GRANULES: "0"
+      SEND_DELAY_MS: "0"
+      REQUEST_DELAY_SEC: "0.2"
+      REQUEST_TIMEOUT_SEC: "30"
+    volumes:
+      - ./checkpoints:/opt/checkpoints
+    command: ["python", "-u", "maiac_ingest.py"]
     networks:
       - bigdata-net
 
@@ -192,9 +275,9 @@ services:
         condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: stock-prices-daily
+      KAFKA_TOPIC: weather_history
       HDFS_WEBHDFS_BASE: http://namenode:9870/webhdfs/v1
-      HDFS_OUTPUT_PATH: /data/stock_prices_daily
+      HDFS_OUTPUT_PATH: /data/weather_history
       NAMENODE_JMX_URL: http://namenode:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystem
       METRICS_SAMPLE_SECONDS: "5"
     ports:
@@ -203,7 +286,7 @@ services:
       - bigdata-net
 
   # ---------------------------------------------------------------------------
-  # SENTINEL-5P INGEST — cào CDSE và gửi summary events vào Kafka
+  # SENTINEL-5P INGEST — source adapter CDSE và gửi summary events vào Kafka
   # ---------------------------------------------------------------------------
   sentinel5p-ingest:
     build:
@@ -213,20 +296,25 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    volumes:
-      - ./data:/data
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: sentinel5p-summary
       # Credentials: set in your environment or .env (do not commit)
-      CDSE_USERNAME: ${CDSE_USERNAME}
-      CDSE_PASSWORD: ${CDSE_PASSWORD}
-      DOWNLOAD_DIR: /data/sentinel5p_data
+      CDSE_USERNAME: ${CDSE_USERNAME:-}
+      CDSE_PASSWORD: ${CDSE_PASSWORD:-}
       BBOX: "100,8,110,24"
-      DATE_START: "${S5P_DATE_START:-}"
-      DATE_END: "${S5P_DATE_END:-}"
+      WINDOW_MODE: ${S5P_WINDOW_MODE:-batch}
+      BATCH_LOOKBACK_DAYS: ${S5P_BATCH_LOOKBACK_DAYS:-7}
+      REALTIME_LOOKBACK_MINUTES: ${S5P_REALTIME_LOOKBACK_MINUTES:-10}
+      REALTIME_CONTINUOUS: ${S5P_REALTIME_CONTINUOUS:-false}
+      REALTIME_POLL_SECONDS: ${S5P_REALTIME_POLL_SECONDS:-600}
+      WINDOW_START_UTC: "${S5P_WINDOW_START_UTC:-}"
+      WINDOW_END_UTC: "${S5P_WINDOW_END_UTC:-}"
+      WINDOW_STATE_FILE: /opt/checkpoints/runtime_state/sentinel5p_window_state.json
       MAX_RESULTS: "1"
       PRODUCTS: "NO2,CO,O3,SO2,CH4,AER"
+    volumes:
+      - ./checkpoints:/opt/checkpoints
     command: ["python", "-u", "sentinel5p_ingest.py"]
     networks:
       - bigdata-net

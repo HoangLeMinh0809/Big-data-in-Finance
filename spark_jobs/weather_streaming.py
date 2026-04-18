@@ -3,7 +3,7 @@
 Weather History — Spark Structured Streaming Job
 =============================================================================
 Chuc nang:
-	1. Doc stream tu Kafka topic "weather-history"
+	1. Doc stream tu Kafka topic "weather_history"
   2. Parse JSON message theo schema output cua ingest_weather
   3. Cast mot so truong thoi gian/phong van
   4. Them cot partition: year, month (dua tren query_date)
@@ -37,7 +37,7 @@ from pyspark.sql.types import (
 # Cau hinh
 # =============================================================================
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
-KAFKA_TOPIC = "weather-history"
+KAFKA_TOPIC = "weather_history"
 CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/weather_history/"
 ICEBERG_CATALOG = "ais"
 ICEBERG_WAREHOUSE = "hdfs://namenode:9000/warehouse/iceberg"
@@ -96,6 +96,10 @@ WEATHER_SCHEMA = StructType([
 	StructField("source", StringType(), True),
 	StructField("source_file", StringType(), True),
 	StructField("ingest_time", StringType(), True),
+	StructField("window_mode", StringType(), True),
+	StructField("window_start_utc", StringType(), True),
+	StructField("window_end_utc", StringType(), True),
+	StructField("window_now_utc", StringType(), True),
 ])
 
 
@@ -156,6 +160,9 @@ def main():
 		.withColumn("query_date", to_date(col("query_date"), "yyyy-MM-dd"))
 		.withColumn("event_time", to_timestamp(col("time"), "yyyy-MM-dd HH:mm"))
 		.withColumn("ingest_time", to_timestamp(col("ingest_time")))
+		.withColumn("window_start_utc", to_timestamp(col("window_start_utc")))
+		.withColumn("window_end_utc", to_timestamp(col("window_end_utc")))
+		.withColumn("window_now_utc", to_timestamp(col("window_now_utc")))
 		.withColumn("year", spark_year(col("query_date")))
 		.withColumn("month", spark_month(col("query_date")))
 		.withColumn("spark_processed_at", current_timestamp())
