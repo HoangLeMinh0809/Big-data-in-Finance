@@ -1,18 +1,4 @@
-"""
-=============================================================================
-Weather History — Spark Structured Streaming Job
-=============================================================================
-Chuc nang:
-  1. Doc stream tu Kafka topic "weather_history"
-  2. Parse JSON message theo schema output cua ingest_weather
-  3. Cast mot so truong thoi gian/phong van
-  4. Them cot partition: year, month (dua tren query_date)
-  5. Ghi Parquet ra HDFS tai /data/weather_history/
-  6. Su dung checkpoint de dam bao exactly-once
 
-Luu y: Day la pass-through pipeline, khong co business transform phuc tap.
-=============================================================================
-"""
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
