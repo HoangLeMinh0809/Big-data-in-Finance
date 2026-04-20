@@ -13,6 +13,10 @@ Pipeline Big Data cho dữ liệu khí quyển: WeatherAPI history, OpenAQ hourl
 7. [Kiểm tra kết quả](#7-kiểm-tra-kết-quả)
 8. [Lưu ý thiết kế cho Kubernetes](#8-lưu-ý-thiết-kế-cho-kubernetes)
 
+## Tài liệu dataset liên quan
+
+- Xem `README_DATASETS.md` để biết chi tiết schema, định dạng và cách khai thác OpenAQ, WeatherAPI, Sentinel-5P (NetCDF) và Mosaic MAIAC (HDF4).
+
 ---
 
 ## 1. Kiến trúc tổng thể
