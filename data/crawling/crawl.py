@@ -14,7 +14,7 @@ DATE_TO   = datetime.now(timezone.utc)
 DATE_FROM = DATE_TO - timedelta(hours=HOURS_BACK)
 TARGET_PARAMETERS = {"pm25", "pm10", "no2", "o3", "co", "so2"}
 # Đặt số nhỏ hơn (vd: 5) để chạy thử nhanh; None = tất cả trạm
-MAX_LOCATIONS = 100
+MAX_LOCATIONS = 5
 REQUEST_DELAY = 0.35
 PAGE_LIMIT = 1000  
 HEADERS = {

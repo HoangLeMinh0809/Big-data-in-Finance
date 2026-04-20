@@ -13,9 +13,9 @@ from kafka.consumer import KafkaConsumer
 app = Flask(__name__)
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "stock-prices-daily")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_history")
 HDFS_WEBHDFS_BASE = os.getenv("HDFS_WEBHDFS_BASE", "http://namenode:9870/webhdfs/v1")
-HDFS_OUTPUT_PATH = os.getenv("HDFS_OUTPUT_PATH", "/data/stock_prices_daily")
+HDFS_OUTPUT_PATH = os.getenv("HDFS_OUTPUT_PATH", "/data/weather_history")
 NAMENODE_JMX_URL = os.getenv(
     "NAMENODE_JMX_URL", "http://namenode:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystem"
 )
@@ -213,8 +213,8 @@ HTML_TEMPLATE = """
 <body>
   <div class="wrap">
     <div class="hero">
-      <h1>Stock Pipeline Live Monitor</h1>
-      <p>The page refreshes every 5 seconds. It tracks Kafka flow and HDFS/DataNode persistence.</p>
+      <h1>AIS Pipeline Live Monitor</h1>
+      <p>The page refreshes every 5 seconds and tracks Kafka flow plus HDFS/DataNode persistence.</p>
     </div>
 
     <div class="grid">
