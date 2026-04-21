@@ -40,10 +40,6 @@ sc = spark.sparkContext
 
 ### 1) OpenAQ — CSV → Hanoi hourly (Spark)
 
-**Mục đích:** Chuẩn hóa dữ liệu đo ground-level từ các trạm quan trắc tại Hà Nội thành bảng hourly sạch. Đây là **ground truth** cho model — nhãn `pm25` dùng để train và validate forecast.
-
-**Lưu ý quan trọng:** Không aggregate về 1 giá trị scalar (mất spatial gradient). Giữ nguyên station-level để dùng cho feature engineering ở bước sau.
-
 ```python
 import pandas as pd
 import numpy as np
@@ -136,8 +132,6 @@ print("Saved: openaq_station_hourly + openaq_hanoi_hourly")
 ---
 
 ### 2) WeatherAPI — surface meteo proxy (giữ lại có chọn lọc)
-
-**Mục đích:** WeatherAPI không đủ để làm trajectory (chỉ 1 điểm, 1 level). Tuy nhiên vẫn giữ lại để lấy các biến surface không có trong ERA5 hourly miễn phí: `condition_code`, `vis_km`, `uv`, `chance_of_rain`. Các biến wind và pressure sẽ bị thay bởi ERA5.
 
 ```python
 import glob, json
@@ -236,7 +230,7 @@ def read_s5p_file(filepath: str, product_key: str, bbox: dict):
     Đọc 1 file S5P NetCDF, mask theo QA + bbox, trả về stats.
     
     Quan trọng: S5P overpass HN ~13:30 giờ địa phương (06:30 UTC).
-    Stats được lưu kèm `overpass_hour_utc` để tránh data leakage
+    Stats được lưu kèm `overpass_hour_utc` để tránh data leakagecomm
     khi join với hourly data (không broadcast cho cả 24h).
     """
     variable_name = PRODUCT_VARS[product_key]
@@ -317,13 +311,9 @@ df_s5p_daily.to_parquet("clean/s5p_hanoi_daily.parquet", index=False)
 print("Saved: clean/s5p_hanoi_daily.parquet", df_s5p_daily.shape)
 ```
 
-**Lưu ý quan trọng về join:** Khi merge S5P vào hourly table, **chỉ join cho các giờ ≥ `overpass_hour_utc`** trong ngày đó. Dùng S5P của ngày `t` cho giờ trước overpass là data leakage. Dùng ffill từ ngày `t-1` cho những giờ trước overpass của ngày `t`.
-
 ---
 
 ### 4) MAIAC/MODIS — HDF → Hanoi daily AOD
-
-**Mục đích:** AOD (Aerosol Optical Depth) từ MAIAC là chỉ số trực tiếp nhất của aerosol loading trong cột khí quyển. Ở Tier 2, AOD dọc theo đường trajectory backward là feature mạnh để xác định nguồn cháy rừng, bụi công nghiệp.
 
 ```python
 from pathlib import Path
@@ -449,15 +439,11 @@ print("Saved: clean/maiac_hanoi_daily.parquet", df_maiac_daily.shape)
 ---
 
 ## TIER 2 — Trajectory Engine
-
----
-
 ### 5) ERA5 wind field — download + Spark processing
 
 **Mục đích:** ERA5 là backbone của HYSPLIT. Cần 2 loại:
 - **Pressure levels** (u, v, w, z): để HYSPLIT trace trajectory theo chiều dọc (3D)
 - **Single levels** (u10, v10, BLH): surface wind + boundary layer height thực (thay `pbl_proxy` heuristic ở Tier 1)
-
 ERA5 có resolution 0.25° × 0.25°, 6-hourly (reanalysis) hoặc hourly (ERA5-Land). Cần bbox rộng đủ để trace 72h backward — air mass từ North China có thể đến HN trong ~48h.
 
 ```python
@@ -814,9 +800,6 @@ print("Saved: clean/hysplit_trajectories.parquet")
 ---
 
 ### 8) Feature engineering — Trajectory clustering + Spatial gradient (Spark)
-
-Đây là bước biến HYSPLIT output thô thành features có ý nghĩa cho model.
-
 #### 8a) Trajectory clustering (K-Means trên path)
 
 **Mục đích:** Phân loại loại air mass theo nguồn gốc. Cluster điển hình cho HN:
