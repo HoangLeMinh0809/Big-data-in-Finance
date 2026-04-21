@@ -5,6 +5,17 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
+from ais_dag_utils import (
+    LOOKBACK_DAYS_TEMPLATE,
+    MAIAC_LOOKBACK_DAYS_TEMPLATE,
+    compose_ingest_command,
+    ensure_cassandra_schema_command,
+    ensure_iceberg_tables_command,
+    ensure_topics_command,
+    spark_cassandra_command,
+    spark_submit_command,
+)
+
 DAG_ID = "ais_batch_orchestration"
 
 DEFAULT_ARGS = {
@@ -12,138 +23,107 @@ DEFAULT_ARGS = {
     "depends_on_past": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=2),
+    "do_xcom_push": False,
 }
-
-SPARK_COMMON_CONF = " \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2 \
-  --conf \"spark.hadoop.fs.defaultFS=hdfs://namenode:9000\" \
-  --conf \"spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions\" \
-  --conf \"spark.sql.catalog.ais=org.apache.iceberg.spark.SparkCatalog\" \
-  --conf \"spark.sql.catalog.ais.type=hadoop\" \
-  --conf \"spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg\" \
-  --conf \"spark.sql.adaptive.enabled=true\" \
-  --conf \"spark.driver.memory=1g\" \
-  --conf \"spark.executor.memory=1g\""
-
-CASSANDRA_CONF = " \
-    --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2,com.datastax.spark:spark-cassandra-connector_2.12:3.5.1 \
-    --conf \"spark.hadoop.fs.defaultFS=hdfs://namenode:9000\" \
-    --conf \"spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions\" \
-    --conf \"spark.sql.catalog.ais=org.apache.iceberg.spark.SparkCatalog\" \
-    --conf \"spark.sql.catalog.ais.type=hadoop\" \
-    --conf \"spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg\" \
-    --conf \"spark.cassandra.connection.host=cassandra\" \
-    --conf \"spark.cassandra.connection.port=9042\" \
-    --conf \"spark.sql.adaptive.enabled=true\" \
-    --conf \"spark.driver.memory=1g\" \
-    --conf \"spark.executor.memory=1g\""
-
-
-def spark_submit_command(app_name: str, job_file: str) -> str:
-    return (
-        "set -euo pipefail\n"
-        f"docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode client --name \"{app_name}\"{SPARK_COMMON_CONF} {job_file}"
-    )
-
-
-def spark_cassandra_command(dataset: str) -> str:
-    app_name = f"IcebergToCassandra_{dataset.capitalize()}"
-    return (
-        "set -euo pipefail\n"
-        f"docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode client --name \"{app_name}\"{CASSANDRA_CONF} /opt/spark-jobs/iceberg_to_cassandra.py {dataset}"
-    )
-
 
 with DAG(
     dag_id=DAG_ID,
     default_args=DEFAULT_ARGS,
     start_date=datetime(2026, 4, 13),
-    schedule=None,
+    schedule=timedelta(days=7),
     catchup=False,
-    tags=["ais", "batch", "airflow"],
-    description="Batch orchestration for ingest adapters and one-shot Spark/Cassandra loads",
+    max_active_runs=1,
+    is_paused_upon_creation=True,
+    tags=["ais", "bootstrap", "historical", "airflow"],
+    description=(
+        "Historical bootstrap/backfill orchestration: ingest to Kafka, one-shot Spark "
+        "loads to Iceberg, then serving refresh to Cassandra"
+    ),
 ) as dag:
-    ensure_weather_topic = BashOperator(
-        task_id="ensure_weather_topic",
-        bash_command=(
-            "set -euo pipefail\n"
-                "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic weather_history --if-not-exists"
-        ),
+    ensure_kafka_topics = BashOperator(
+        task_id="ensure_kafka_topics",
+        bash_command=ensure_topics_command(),
     )
 
-    ensure_openaq_topic = BashOperator(
-        task_id="ensure_openaq_topic",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic openaq-hourly --if-not-exists"
-        ),
+    ensure_iceberg_tables = BashOperator(
+        task_id="ensure_iceberg_tables",
+        bash_command=ensure_iceberg_tables_command(),
     )
 
-    ensure_sentinel5p_topic = BashOperator(
-        task_id="ensure_sentinel5p_topic",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic sentinel5p-summary --if-not-exists"
-        ),
-    )
-
-    ensure_maiac_topic = BashOperator(
-        task_id="ensure_maiac_topic",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --replication-factor 1 --partitions 3 --topic maiac-summary --if-not-exists"
-        ),
+    ensure_cassandra_schema = BashOperator(
+        task_id="ensure_cassandra_schema",
+        bash_command=ensure_cassandra_schema_command(),
     )
 
     run_weather_ingest = BashOperator(
         task_id="run_weather_ingest",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 ingest python -u ingest_weather.py"
+        bash_command=compose_ingest_command(
+            "ingest",
+            "ingest_weather.py",
+            lookback_days_template=LOOKBACK_DAYS_TEMPLATE,
         ),
     )
 
     run_openaq_ingest = BashOperator(
         task_id="run_openaq_ingest",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 openaq-ingest python -u openaq_ingest.py"
+        bash_command=compose_ingest_command(
+            "openaq-ingest",
+            "openaq_ingest.py",
+            lookback_days_template=LOOKBACK_DAYS_TEMPLATE,
         ),
     )
 
     run_sentinel5p_ingest = BashOperator(
         task_id="run_sentinel5p_ingest",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=7 sentinel5p-ingest python -u sentinel5p_ingest.py"
+        bash_command=compose_ingest_command(
+            "sentinel5p-ingest",
+            "sentinel5p_ingest.py",
+            lookback_days_template=LOOKBACK_DAYS_TEMPLATE,
         ),
     )
 
     run_maiac_ingest = BashOperator(
         task_id="run_maiac_ingest",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS=30 maiac-ingest python -u maiac_ingest.py"
+        bash_command=compose_ingest_command(
+            "maiac-ingest",
+            "maiac_ingest.py",
+            lookback_days_template=MAIAC_LOOKBACK_DAYS_TEMPLATE,
         ),
     )
 
-    run_weather_spark = BashOperator(
-        task_id="run_weather_spark",
-        bash_command=spark_submit_command("WeatherHistory_Streaming", "/opt/spark-jobs/weather_streaming.py"),
+    process_weather_to_iceberg = BashOperator(
+        task_id="process_weather_to_iceberg",
+        bash_command=spark_submit_command(
+            "WeatherHistory_Bootstrap",
+            "/opt/spark-jobs/weather_streaming.py",
+            starting_offsets="earliest",
+        ),
     )
 
-    run_openaq_spark = BashOperator(
-        task_id="run_openaq_spark",
-        bash_command=spark_submit_command("OpenAQHourly_Streaming", "/opt/spark-jobs/openaq_hourly_streaming.py"),
+    process_openaq_to_iceberg = BashOperator(
+        task_id="process_openaq_to_iceberg",
+        bash_command=spark_submit_command(
+            "OpenAQHourly_Bootstrap",
+            "/opt/spark-jobs/openaq_hourly_streaming.py",
+            starting_offsets="earliest",
+        ),
     )
 
-    ensure_cassandra_schema = BashOperator(
-        task_id="ensure_cassandra_schema",
-        bash_command=(
-            "set -euo pipefail\n"
-            "docker exec cassandra cqlsh -e \"CREATE KEYSPACE IF NOT EXISTS ais_serving WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};\"\n"
-            "docker exec cassandra cqlsh -e \"CREATE TABLE IF NOT EXISTS ais_serving.weather_hourly_by_province_day (province text, day text, event_time timestamp, event_id text, query_date text, location_name text, lat double, lon double, temp_c double, temp_f double, humidity int, wind_kph double, wind_degree int, wind_dir text, precip_mm double, condition_text text, source text, ingest_time text, PRIMARY KEY ((province, day), event_time)) WITH CLUSTERING ORDER BY (event_time DESC);\"\n"
-            "docker exec cassandra cqlsh -e \"CREATE TABLE IF NOT EXISTS ais_serving.openaq_hourly_by_city_parameter_day (city text, parameter text, day text, event_time timestamp, event_id text, location_id bigint, location_name text, provider text, sensor_id bigint, unit text, value double, min double, max double, sd double, coverage_pct double, source text, ingest_time text, PRIMARY KEY ((city, parameter, day), event_time)) WITH CLUSTERING ORDER BY (event_time DESC);\""
+    process_sentinel5p_to_iceberg = BashOperator(
+        task_id="process_sentinel5p_to_iceberg",
+        bash_command=spark_submit_command(
+            "Sentinel5PSummary_Bootstrap",
+            "/opt/spark-jobs/sentinel5p_summary_streaming.py",
+            starting_offsets="earliest",
+        ),
+    )
+
+    process_maiac_to_iceberg = BashOperator(
+        task_id="process_maiac_to_iceberg",
+        bash_command=spark_submit_command(
+            "MAIACSummary_Bootstrap",
+            "/opt/spark-jobs/maiac_summary_streaming.py",
+            starting_offsets="earliest",
         ),
     )
 
@@ -157,26 +137,39 @@ with DAG(
         bash_command=spark_cassandra_command("openaq"),
     )
 
-    pipeline_done = BashOperator(
-        task_id="pipeline_done",
+    bootstrap_done = BashOperator(
+        task_id="bootstrap_done",
         bash_command=(
             "set -euo pipefail\n"
-            "echo 'AIS batch orchestration finished. Realtime path remains Kafka + Spark long-running jobs.'"
+            "echo 'Historical bootstrap complete: Iceberg is the historical source of truth; Cassandra is refreshed for serving.'"
         ),
     )
 
-    [
-        ensure_weather_topic,
-        ensure_openaq_topic,
-        ensure_sentinel5p_topic,
-        ensure_maiac_topic,
-    ] >> [
+    ensure_kafka_topics >> [
         run_weather_ingest,
         run_openaq_ingest,
         run_sentinel5p_ingest,
         run_maiac_ingest,
     ]
 
-    [run_weather_ingest, run_openaq_ingest] >> [run_weather_spark, run_openaq_spark]
-    [run_weather_spark, run_openaq_spark] >> ensure_cassandra_schema
-    ensure_cassandra_schema >> [load_weather_cassandra, load_openaq_cassandra] >> pipeline_done
+    ensure_iceberg_tables >> [
+        process_weather_to_iceberg,
+        process_openaq_to_iceberg,
+        process_sentinel5p_to_iceberg,
+        process_maiac_to_iceberg,
+    ]
+
+    run_weather_ingest >> process_weather_to_iceberg
+    run_openaq_ingest >> process_openaq_to_iceberg
+    run_sentinel5p_ingest >> process_sentinel5p_to_iceberg
+    run_maiac_ingest >> process_maiac_to_iceberg
+
+    [process_weather_to_iceberg, process_openaq_to_iceberg] >> ensure_cassandra_schema
+    ensure_cassandra_schema >> [load_weather_cassandra, load_openaq_cassandra]
+
+    [
+        load_weather_cassandra,
+        load_openaq_cassandra,
+        process_sentinel5p_to_iceberg,
+        process_maiac_to_iceberg,
+    ] >> bootstrap_done

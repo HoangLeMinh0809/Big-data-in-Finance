@@ -12,8 +12,6 @@ services:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
     hostname: zookeeper
-    ports:
-      - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -21,10 +19,11 @@ services:
     networks:
       - bigdata-net
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      test: ["CMD-SHELL", "bash -lc 'echo > /dev/tcp/127.0.0.1/2181'"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 30
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # KAFKA — message broker, nhận events từ ingest, cung cấp cho Spark
@@ -56,7 +55,8 @@ services:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 20
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # HDFS NAMENODE — quản lý metadata của hệ thống file phân tán
@@ -80,7 +80,8 @@ services:
       test: ["CMD-SHELL", "curl -f http://localhost:9870/ || exit 1"]
       interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 20
+      start_period: 60s
 
   # ---------------------------------------------------------------------------
   # HDFS DATANODE — lưu trữ dữ liệu thực tế (block storage)
@@ -121,6 +122,7 @@ services:
     volumes:
       - ./spark_jobs:/opt/spark-jobs
       - ./checkpoints:/opt/checkpoints
+      - spark_ivy_cache:/root/.ivy2
     networks:
       - bigdata-net
 
@@ -142,6 +144,7 @@ services:
     volumes:
       - ./spark_jobs:/opt/spark-jobs
       - ./checkpoints:/opt/checkpoints
+      - spark_ivy_cache:/root/.ivy2
     networks:
       - bigdata-net
 
@@ -156,9 +159,12 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    restart: on-failure
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: weather_history
+      KAFKA_CONNECT_MAX_RETRIES: "120"
+      KAFKA_CONNECT_RETRY_DELAY: "5"
       SOURCE_MODE: ${WEATHER_SOURCE_MODE:-api}
       WEATHER_API_KEY: ${WEATHER_API_KEY:-}
       WEATHER_QUERY_LIST: "${WEATHER_QUERY_LIST:-}"
@@ -197,9 +203,12 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    restart: on-failure
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: openaq-hourly
+      KAFKA_CONNECT_MAX_RETRIES: "120"
+      KAFKA_CONNECT_RETRY_DELAY: "5"
       OPENAQ_API_KEY: ${OPENAQ_API_KEY:-}
       WINDOW_MODE: ${OPENAQ_WINDOW_MODE:-batch}
       BATCH_LOOKBACK_DAYS: ${OPENAQ_BATCH_LOOKBACK_DAYS:-7}
@@ -229,9 +238,12 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    restart: on-failure
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: maiac-summary
+      KAFKA_CONNECT_MAX_RETRIES: "120"
+      KAFKA_CONNECT_RETRY_DELAY: "5"
       CMR_GRANULES_URL: https://cmr.earthdata.nasa.gov/search/granules.json
       MAIAC_SHORT_NAME: ${MAIAC_SHORT_NAME:-MCD19A2}
       MAIAC_VERSION: ${MAIAC_VERSION:-061}
@@ -261,11 +273,11 @@ services:
   # MONITORING UI — theo dõi throughput và trạng thái lưu dữ liệu vào HDFS
   # ---------------------------------------------------------------------------
   monitoring-ui:
-    build:
-      context: ./monitoring
-      dockerfile: Dockerfile
+    image: ais-airflow:2.9.3
+    pull_policy: never
     container_name: monitoring-ui
     hostname: monitoring-ui
+    user: "0:0"
     depends_on:
       kafka:
         condition: service_healthy
@@ -277,9 +289,23 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: weather_history
       HDFS_WEBHDFS_BASE: http://namenode:9870/webhdfs/v1
-      HDFS_OUTPUT_PATH: /data/weather_history
+      HDFS_OUTPUT_PATH: /warehouse/iceberg
       NAMENODE_JMX_URL: http://namenode:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystem
+      AIRFLOW_API_BASE: http://airflow-webserver:8080/api/v1
+      AIRFLOW_DAG_ID: ais_batch_orchestration
+      AIRFLOW_USERNAME: admin
+      AIRFLOW_PASSWORD: admin
       METRICS_SAMPLE_SECONDS: "5"
+      PYTHONUNBUFFERED: "1"
+    working_dir: /app
+    volumes:
+      - ./monitoring:/app
+    command: >
+      bash -c "if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+      apt-get update && apt-get install -y --no-install-recommends docker-compose-plugin || apt-get install -y --no-install-recommends docker-compose || true;
+      fi &&
+      python -m pip install --no-cache-dir -r requirements.txt &&
+      python -u app.py"
     ports:
       - "8501:8501"
     networks:
@@ -296,9 +322,12 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    restart: on-failure
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: sentinel5p-summary
+      KAFKA_CONNECT_MAX_RETRIES: "120"
+      KAFKA_CONNECT_RETRY_DELAY: "5"
       # Credentials: set in your environment or .env (do not commit)
       CDSE_USERNAME: ${CDSE_USERNAME:-}
       CDSE_PASSWORD: ${CDSE_PASSWORD:-}
@@ -375,32 +404,36 @@ services:
       context: ./airflow
       dockerfile: Dockerfile
     image: ais-airflow:2.9.3
+    pull_policy: never
     container_name: airflow-init
     hostname: airflow-init
     depends_on:
       airflow-postgres:
         condition: service_healthy
-    user: "50000:0"
+    user: "0:0"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       AIRFLOW_UID: 50000
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
+      - ./:/opt/ais
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - /var/run/docker.sock:/var/run/docker.sock
     command: >
-      bash -c "airflow db migrate &&
+      bash -c "set -e;
+      airflow db migrate;
       airflow users create
       --username admin
       --firstname Air
       --lastname Flow
       --role Admin
       --email admin@example.com
-      --password admin"
+      --password admin || echo 'admin already exists, skipping create';"
     networks:
       - bigdata-net
 
@@ -408,25 +441,23 @@ services:
   # AIRFLOW WEBSERVER
   # ---------------------------------------------------------------------------
   airflow-webserver:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
     image: ais-airflow:2.9.3
+    pull_policy: never
     container_name: airflow-webserver
     hostname: airflow-webserver
     depends_on:
       airflow-postgres:
         condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
-    user: "50000:0"
+    user: "0:0"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       AIRFLOW_UID: 50000
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
+      - ./:/opt/ais
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
@@ -446,25 +477,23 @@ services:
   # AIRFLOW SCHEDULER
   # ---------------------------------------------------------------------------
   airflow-scheduler:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
     image: ais-airflow:2.9.3
+    pull_policy: never
     container_name: airflow-scheduler
     hostname: airflow-scheduler
     depends_on:
       airflow-postgres:
         condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
-    user: "50000:0"
+    user: "0:0"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       AIRFLOW_UID: 50000
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
+      - ./:/opt/ais
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
@@ -477,25 +506,23 @@ services:
   # AIRFLOW TRIGGERER
   # ---------------------------------------------------------------------------
   airflow-triggerer:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
     image: ais-airflow:2.9.3
+    pull_policy: never
     container_name: airflow-triggerer
     hostname: airflow-triggerer
     depends_on:
       airflow-postgres:
         condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
-    user: "50000:0"
+    user: "0:0"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       AIRFLOW_UID: 50000
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
+      - ./:/opt/ais
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
@@ -523,4 +550,6 @@ volumes:
   cassandra_data:
     driver: local
   airflow_postgres_data:
+    driver: local
+  spark_ivy_cache:
     driver: local

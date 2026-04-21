@@ -6,8 +6,14 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 import requests
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    # Allow running without python-dotenv in minimal images.
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 from kafka_utils import create_kafka_producer as create_shared_kafka_producer, send_events
 from window_utils import (

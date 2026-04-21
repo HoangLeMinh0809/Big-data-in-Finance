@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 from kafka import KafkaProducer
@@ -8,11 +9,14 @@ from kafka.errors import NoBrokersAvailable
 def create_kafka_producer(
     bootstrap_servers: str,
     logger,
-    max_retries: int = 10,
-    retry_delay: int = 5,
+    max_retries: int | None = None,
+    retry_delay: int | None = None,
 ) -> KafkaProducer:
     """Create a Kafka producer with simple retry logic while broker is starting."""
-    for attempt in range(1, max_retries + 1):
+    resolved_max_retries = int(os.getenv("KAFKA_CONNECT_MAX_RETRIES", str(max_retries or 10)))
+    resolved_retry_delay = int(os.getenv("KAFKA_CONNECT_RETRY_DELAY", str(retry_delay or 5)))
+
+    for attempt in range(1, resolved_max_retries + 1):
         try:
             producer = KafkaProducer(
                 bootstrap_servers=bootstrap_servers,
@@ -25,8 +29,10 @@ def create_kafka_producer(
             logger.info(f"Kafka connected (attempt {attempt})")
             return producer
         except NoBrokersAvailable:
-            logger.warning(f"Kafka not ready (attempt {attempt}/{max_retries}), wait {retry_delay}s")
-            time.sleep(retry_delay)
+            logger.warning(
+                f"Kafka not ready (attempt {attempt}/{resolved_max_retries}), wait {resolved_retry_delay}s"
+            )
+            time.sleep(resolved_retry_delay)
 
     raise RuntimeError("Cannot connect to Kafka")
 

@@ -3,3 +3,4 @@ kafka-python==2.0.2
 requests==2.31.0
 numpy==1.26.4
 netCDF4==1.6.5
+python-dotenv==1.0.1

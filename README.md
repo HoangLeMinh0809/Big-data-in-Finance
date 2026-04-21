@@ -1,5 +1,267 @@
 # Atmospheric Intelligence System (AIS)
 
+Refactored architecture (April 2026):
+- Iceberg is the historical source of truth.
+- Cassandra is serving storage for low-latency queries.
+- Realtime/near-realtime sources run as long-running Spark Structured Streaming jobs.
+- Airflow is used for orchestration, supervision, backfill, and maintenance.
+
+## 1. Refactored architecture
+
+### 1.1 Architecture diagram
+
+```mermaid
+flowchart LR
+  subgraph Sources
+    W[Weather API / local weather history]
+    O[OpenAQ API]
+    S[Sentinel-5P metadata API]
+    M[MAIAC metadata API]
+  end
+
+  subgraph Ingestion
+    IW[weather ingest]
+    IO[openaq ingest]
+    IS[sentinel5p ingest]
+    IM[maiac ingest]
+  end
+
+  subgraph Streaming_Batch_Compute
+    K[(Kafka)]
+    SW[weather streaming processor]
+    SO[openaq streaming processor]
+    SS[sentinel5p streaming processor]
+    SM[maiac processor]
+  end
+
+  subgraph Storage
+    I[(Iceberg on HDFS)]
+    C[(Cassandra serving)]
+  end
+
+  subgraph Control
+    A[Airflow DAGs]
+    MON[Monitoring UI]
+  end
+
+  W --> IW --> K
+  O --> IO --> K
+  S --> IS --> K
+  M --> IM --> K
+
+  K --> SW --> I
+  K --> SO --> I
+  K --> SS --> I
+  K --> SM --> I
+
+  I --> C
+
+  A --> IW
+  A --> IO
+  A --> IS
+  A --> IM
+  A --> SW
+  A --> SO
+  A --> SS
+  A --> SM
+  A --> I
+  A --> C
+
+  MON --> A
+  MON --> K
+  MON --> I
+```
+
+### 1.2 Data flow diagram
+
+```mermaid
+flowchart TD
+  A[Source events] --> B[Ingest adapters]
+  B --> C[Kafka topics]
+  C --> D1[Weather stream]
+  C --> D2[OpenAQ stream]
+  C --> D3[Sentinel-5P stream]
+  C --> D4[MAIAC stream/backfill]
+
+  D1 --> E[Iceberg weather.weather_history_bronze]
+  D2 --> F[Iceberg air_quality.openaq_hourly_bronze]
+  D3 --> G[Iceberg satellite.sentinel5p_summary_bronze]
+  D4 --> H[Iceberg satellite.maiac_summary_bronze]
+
+  E --> I1[Cassandra weather_hourly_by_province_day]
+  F --> I2[Cassandra openaq_hourly_by_city_parameter_day]
+```
+
+### 1.3 DAG responsibility diagram
+
+```mermaid
+flowchart LR
+  D1[ais_batch_orchestration]
+  D2[ais_streaming_supervision]
+  D3[ais_maiac_backfill]
+  D4[ais_maintenance]
+
+  D1 --> R1[Historical bootstrap]
+  D1 --> R2[One-shot processing to Iceberg]
+  D1 --> R3[Serving refresh to Cassandra]
+
+  D2 --> R4[Ensure topics/tables/schemas]
+  D2 --> R5[Start/check/restart streaming jobs]
+  D2 --> R6[Kafka lag checks]
+
+  D3 --> R7[Delayed MAIAC ingest]
+  D3 --> R8[Backfill MAIAC to Iceberg]
+
+  D4 --> R9[Iceberg rewrite data files]
+  D4 --> R10[Expire snapshots/orphan cleanup]
+  D4 --> R11[Iceberg vs Cassandra reconciliation]
+```
+
+## 2. Pipeline paths
+
+### 2.1 Historical bootstrap
+
+Implemented by DAG `ais_batch_orchestration`:
+1. Ensure Kafka topics.
+2. Ensure Iceberg namespaces/tables.
+3. Run batch ingest for weather, openaq, sentinel5p, maiac.
+4. Run one-shot Spark catchup for each source (`--stop-after-batch 1`) to persist into Iceberg.
+5. Refresh weather/openaq serving tables in Cassandra.
+
+### 2.2 Streaming supervision
+
+Implemented by DAG `ais_streaming_supervision`:
+1. Ensure topics/tables/schema.
+2. Ensure long-running streaming processors are running (start if missing).
+3. Check Kafka lag for stream consumer groups.
+
+### 2.3 MAIAC delayed backfill
+
+Implemented by DAG `ais_maiac_backfill`:
+1. Pull delayed MAIAC metadata in batch windows.
+2. Process to Iceberg via one-shot Spark catchup.
+3. Optional serving refresh hook (currently no MAIAC Cassandra serving table is defined).
+
+### 2.4 Maintenance and validation
+
+Implemented by DAG `ais_maintenance`:
+1. `rewrite_data_files` compact pass.
+2. `expire_snapshots` and `remove_orphan_files`.
+3. Reconciliation check Iceberg vs Cassandra for weather/openaq.
+
+## 3. Key modules (refactored)
+
+### Orchestration
+- `airflow/dags/ais_pipeline_dag.py`: bootstrap/historical load DAG (kept existing DAG id).
+- `airflow/dags/ais_streaming_supervision_dag.py`: stream supervision DAG.
+- `airflow/dags/ais_maiac_backfill_dag.py`: MAIAC delayed backfill DAG.
+- `airflow/dags/ais_maintenance_dag.py`: maintenance/reconciliation DAG.
+- `airflow/dags/ais_dag_utils.py`: shared command builders used by DAGs.
+
+### Ingestion
+- `ingest/ingest_weather.py`
+- `ingest/openaq_ingest.py`
+- `ingest/sentinel5p_ingest.py`
+- `ingest/maiac_ingest.py`
+- Shared:
+- `ingest/kafka_utils.py`
+- `ingest/window_utils.py`
+
+### Processing and storage
+- `spark_jobs/weather_streaming.py`
+- `spark_jobs/openaq_hourly_streaming.py`
+- `spark_jobs/sentinel5p_summary_streaming.py`
+- `spark_jobs/maiac_summary_streaming.py`
+- `spark_jobs/iceberg_to_cassandra.py`
+- `spark_jobs/ensure_iceberg_tables.py`
+- `spark_jobs/iceberg_maintenance.py`
+- `spark_jobs/reconcile_iceberg_cassandra.py`
+- `spark_jobs/runtime_utils.py`
+
+### Supervision scripts
+- `scripts/airflow/ensure_stream_job.sh`
+- `scripts/airflow/check_kafka_lag.sh`
+- `scripts/submit_spark.sh`
+- `scripts/backfill_all_sources.sh`
+- `scripts/run_infrastructure_only.sh`
+
+## 4. Local/dev runbook
+
+### 4.1 Start infrastructure
+
+```bash
+bash scripts/run_infrastructure_only.sh
+```
+
+This script starts:
+- Kafka, HDFS, Spark, Cassandra
+- Iceberg table ensure job
+- long-running Spark processors (detached)
+- Airflow services
+- monitoring UI
+
+### 4.2 Trigger historical bootstrap
+
+Option A (UI):
+- Open `http://localhost:8501`
+- Click `Start 7-Day Backfill DAG`
+
+Option B (Airflow CLI/API):
+- Trigger DAG `ais_batch_orchestration` with conf `lookback_days`.
+
+Option C (manual script):
+
+```bash
+LOOKBACK_DAYS=7 bash scripts/backfill_all_sources.sh
+```
+
+### 4.3 Streaming operation
+
+Streaming jobs are expected to stay long-running:
+- `WeatherHistory_Streaming`
+- `OpenAQHourly_Streaming`
+- `Sentinel5PSummary_Streaming`
+- `MAIACSummary_Streaming`
+
+Supervision DAG `ais_streaming_supervision` ensures these jobs remain up.
+
+### 4.4 MAIAC backfill
+
+Use DAG `ais_maiac_backfill` (daily schedule) or trigger manually in Airflow for ad-hoc windows.
+
+### 4.5 Maintenance
+
+Use DAG `ais_maintenance` for compaction/snapshot expiration/reconciliation.
+
+## 5. Monitoring
+
+- Monitoring UI: `http://localhost:8501`
+- Airflow UI: `http://localhost:8088`
+- Spark master UI: `http://localhost:8080`
+- HDFS UI: `http://localhost:9870`
+
+Monitoring now checks persisted data under Iceberg warehouse path by default.
+
+## 6. Migration notes
+
+### 6.1 Major changes
+- Sentinel-5P and MAIAC processors now persist to Iceberg tables (not only parquet path sinks).
+- Weather/OpenAQ processors now run long-running by default and support bootstrap mode via `--stop-after-batch 1`.
+- Airflow orchestration split by responsibility into bootstrap, supervision, backfill, maintenance DAGs.
+- Added lag checks and stream auto-start checks for supervision.
+- Added Iceberg maintenance and Iceberg-vs-Cassandra reconciliation jobs.
+
+### 6.2 Backward compatibility
+- Existing DAG id `ais_batch_orchestration` is preserved.
+- Existing ingest modules and Kafka topic names are preserved.
+- Existing serving tables in Cassandra for weather/openaq are preserved.
+
+### 6.3 Operational cautions
+- Cassandra remains serving storage, not historical source.
+- If Kafka consumer groups are still warming up, lag checks may return warnings until first commits.
+- MAIAC Cassandra serving table is intentionally not introduced yet; MAIAC is persisted in Iceberg and can be projected later if required.
+# Atmospheric Intelligence System (AIS)
+
 Pipeline Big Data cho dữ liệu khí quyển: WeatherAPI history, OpenAQ hourly, Sentinel-5P và MAIAC. Kiến trúc vận hành chuẩn: Python ingest adapters -> Kafka -> Spark (realtime/batch) -> Iceberg/HDFS -> Cassandra, với Airflow chỉ giữ vai trò batch orchestration.
 
 ## Mục lục
@@ -242,7 +504,8 @@ bash scripts/submit_spark.sh cassandra-openaq
 ### 6. Chạy Airflow orchestration
 
 ```bash
-docker-compose up -d airflow-postgres airflow-init airflow-webserver airflow-scheduler airflow-triggerer
+docker compose up --build airflow-init
+docker compose up -d airflow-webserver airflow-scheduler airflow-triggerer
 ```
 
 Airflow UI: http://localhost:8088

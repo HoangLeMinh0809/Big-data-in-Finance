@@ -1,25 +1,44 @@
 import json
+import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from kafka import TopicPartition
 from kafka.admin import KafkaAdminClient
 from kafka.consumer import KafkaConsumer
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_history")
 HDFS_WEBHDFS_BASE = os.getenv("HDFS_WEBHDFS_BASE", "http://namenode:9870/webhdfs/v1")
-HDFS_OUTPUT_PATH = os.getenv("HDFS_OUTPUT_PATH", "/data/weather_history")
+HDFS_OUTPUT_PATH = os.getenv("HDFS_OUTPUT_PATH", "/warehouse/iceberg")
 NAMENODE_JMX_URL = os.getenv(
     "NAMENODE_JMX_URL", "http://namenode:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystem"
 )
 METRICS_SAMPLE_SECONDS = float(os.getenv("METRICS_SAMPLE_SECONDS", "5"))
+AIRFLOW_API_BASE = os.getenv("AIRFLOW_API_BASE", "http://airflow-webserver:8080/api/v1").rstrip("/")
+AIRFLOW_DAG_ID = os.getenv("AIRFLOW_DAG_ID", "ais_batch_orchestration")
+AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "admin")
+AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "admin")
+
+# Ingest source mapping: source name -> (container name, lookback days, topic)
+# All sources default to 7 days for UI-triggered backfill (can override via env)
+INGEST_SOURCES = {
+    "weather": ("ingest", 7, "weather_history"),
+    "openaq": ("openaq-ingest", 7, "openaq-hourly"),
+    "sentinel5p": ("sentinel5p-ingest", 7, "sentinel5p-summary"),
+    "maiac": ("maiac-ingest", 7, "maiac-summary"),
+}
 
 # Keep a small in-memory state to estimate throughput.
 _state_lock = threading.Lock()
@@ -27,6 +46,19 @@ _last_sample = {
     "timestamp": None,
     "messages_total": None,
     "throughput_mps": 0.0,
+}
+
+# Ingest job state tracker
+_ingest_job_lock = threading.Lock()
+_ingest_job = {
+    "status": "idle",  # idle, running, done, error
+    "source": None,
+    "started_at": None,
+    "ended_at": None,
+    "messages_sent_before": 0,
+    "messages_sent_current": 0,
+    "error_msg": None,
+    "thread": None,
 }
 
 
@@ -241,6 +273,17 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="section">
+      <h2>Run Airflow Backfill Loop</h2>
+      <p style="color: #6b7280; margin-bottom: 12px; font-size: 0.9rem;">
+        Start the Airflow DAG manually once. It will run now and continue on a 7-day cycle.
+      </p>
+      <button id="dag-trigger-btn" onclick="triggerAirflowBackfill()" style="padding: 12px 14px; width: 100%; background: #0f766e; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 700;">
+        Start 7-Day Backfill DAG
+      </button>
+      <div id="dag-trigger-status" style="margin-top: 12px; padding: 10px; background: #f3f4f6; border-radius: 8px; font-size: 0.9rem; color: #1f2937; display: none;"></div>
+    </div>
+
+    <div class="section">
       <h2>Cluster Status</h2>
       <table class="table">
         <tr>
@@ -336,9 +379,81 @@ HTML_TEMPLATE = """
     loadMetrics();
     setInterval(loadMetrics, 5000);
   </script>
+
+  <script>
+    async function triggerAirflowBackfill() {
+      const statusDiv = document.getElementById('dag-trigger-status');
+      const button = document.getElementById('dag-trigger-btn');
+
+      statusDiv.style.display = 'block';
+      statusDiv.textContent = 'Calling Airflow API to unpause + trigger DAG...';
+      statusDiv.style.background = '#fef3c7';
+      statusDiv.style.color = '#92400e';
+      button.disabled = true;
+      button.style.opacity = '0.7';
+
+      try {
+        const res = await fetch('/api/airflow/start-backfill', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.status === 'ok') {
+          statusDiv.textContent = `DAG triggered: ${data.dag_run_id}. Next cycles run every 7 days.`;
+          statusDiv.style.background = '#dcfce7';
+          statusDiv.style.color = '#166534';
+        } else {
+          statusDiv.textContent = `Failed to trigger DAG: ${data.message || data.error || 'Unknown error'}`;
+          statusDiv.style.background = '#fee2e2';
+          statusDiv.style.color = '#b91c1c';
+        }
+      } catch (err) {
+        statusDiv.textContent = `Error: ${err.message}`;
+        statusDiv.style.background = '#fee2e2';
+        statusDiv.style.color = '#b91c1c';
+      } finally {
+        button.disabled = false;
+        button.style.opacity = '1';
+      }
+    }
+  </script>
 </body>
 </html>
 """
+
+
+def _airflow_request(method: str, path: str, payload: dict | None = None):
+    return requests.request(
+        method=method,
+        url=f"{AIRFLOW_API_BASE}{path}",
+        auth=(AIRFLOW_USERNAME, AIRFLOW_PASSWORD),
+        json=payload,
+        timeout=20,
+    )
+
+
+def _trigger_airflow_dag(lookback_days: int = 7) -> tuple[bool, str, str | None]:
+    try:
+        unpause_resp = _airflow_request("PATCH", f"/dags/{AIRFLOW_DAG_ID}", {"is_paused": False})
+        if unpause_resp.status_code >= 300:
+            return False, f"Cannot unpause DAG: {unpause_resp.text}", None
+
+        now_utc = datetime.now(timezone.utc)
+        dag_run_id = f"ui_backfill_{now_utc.strftime('%Y%m%dT%H%M%S')}"
+        trigger_payload = {
+            "dag_run_id": dag_run_id,
+            "conf": {"lookback_days": int(lookback_days)},
+        }
+
+        trigger_resp = _airflow_request(
+            "POST",
+            f"/dags/{AIRFLOW_DAG_ID}/dagRuns",
+            trigger_payload,
+        )
+        if trigger_resp.status_code >= 300:
+            return False, f"Cannot trigger DAG: {trigger_resp.text}", None
+
+        return True, "DAG started", dag_run_id
+    except Exception as exc:
+        logger.error(f"Failed to trigger Airflow DAG: {exc}")
+        return False, str(exc), None
 
 
 def _parse_live_nodes(raw_value):
@@ -439,6 +554,154 @@ def _collect_datanode_status():
     }
 
 
+def _get_kafka_message_count(topic: str) -> int:
+    """Get current message count for a specific Kafka topic."""
+    try:
+        admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, client_id="monitoring-tracker")
+        try:
+            topic_meta = admin.describe_topics([topic])
+            partitions = [p["partition"] for p in topic_meta[0].get("partitions", [])]
+        finally:
+            admin.close()
+
+        if not partitions:
+            return 0
+
+        consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, group_id=None, enable_auto_commit=False)
+        try:
+            topic_partitions = [TopicPartition(topic, p) for p in partitions]
+            end_offsets = consumer.end_offsets(topic_partitions)
+            return sum(end_offsets.get(tp, 0) for tp in topic_partitions)
+        finally:
+            consumer.close()
+    except Exception as e:
+        logger.error(f"Error getting Kafka count for {topic}: {e}")
+        return 0
+
+
+def _run_ingest_subprocess(source: str, container: str, lookback_days: int) -> tuple[bool, str | None]:
+    """
+    Run ingest subprocess.
+    Returns (success, error_message).
+
+    Some images include Docker CLI without Compose plugin. In that case,
+    fallback to docker-compose binary if available.
+    """
+    compose_v2_cmd = [
+        "docker",
+        "compose",
+        "run",
+        "--rm",
+        "-e",
+        "WINDOW_MODE=batch",
+        "-e",
+        f"BATCH_LOOKBACK_DAYS={lookback_days}",
+        container,
+    ]
+    compose_v1_cmd = [
+        "docker-compose",
+        "run",
+        "--rm",
+        "-e",
+        "WINDOW_MODE=batch",
+        "-e",
+        f"BATCH_LOOKBACK_DAYS={lookback_days}",
+        container,
+    ]
+    plugin_paths = [
+        "/usr/libexec/docker/cli-plugins/docker-compose",
+        "/usr/lib/docker/cli-plugins/docker-compose",
+        "/usr/local/lib/docker/cli-plugins/docker-compose",
+    ]
+
+    candidates = [compose_v2_cmd]
+    if shutil.which("docker-compose"):
+        candidates.append(compose_v1_cmd)
+    for plugin_path in plugin_paths:
+        if os.path.exists(plugin_path):
+            candidates.append([
+                plugin_path,
+                "run",
+                "--rm",
+                "-e",
+                "WINDOW_MODE=batch",
+                "-e",
+                f"BATCH_LOOKBACK_DAYS={lookback_days}",
+                container,
+            ])
+
+    last_error = None
+    try:
+        for cmd in candidates:
+            logger.info(f"Running ingest: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            if result.returncode == 0:
+                logger.info(f"Ingest succeeded ({source})")
+                return True, None
+
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            combined = stderr or stdout or f"Command failed with exit code {result.returncode}"
+            last_error = combined
+
+            logger.error(f"Ingest failed ({source}) with {' '.join(cmd[:2])}: {combined}")
+
+            # Fallback when Docker CLI cannot run compose subcommand properly.
+            if cmd[:2] == ["docker", "compose"] and (
+                "unknown flag: --rm" in combined
+                or "'compose' is not a docker command" in combined
+            ):
+                continue
+
+            break
+
+        return False, last_error
+    except Exception as e:
+        logger.error(f"Error running ingest ({source}): {e}")
+        return False, str(e)
+
+
+def _run_ingest_thread(source: str, lookback_days: int = 7):
+    """
+    Background thread runner for ingest. Updates _ingest_job state during execution.
+    """
+    with _ingest_job_lock:
+        if source not in INGEST_SOURCES:
+            _ingest_job["status"] = "error"
+            _ingest_job["error_msg"] = f"Unknown source: {source}"
+            return
+
+        container, default_lookback, topic = INGEST_SOURCES[source]
+        
+        # Use provided lookback_days or default
+        actual_lookback = lookback_days if lookback_days else default_lookback
+        
+        # Capture initial message count
+        msg_count_before = _get_kafka_message_count(topic)
+        
+        _ingest_job["status"] = "running"
+        _ingest_job["source"] = source
+        _ingest_job["started_at"] = datetime.now(timezone.utc).isoformat()
+        _ingest_job["ended_at"] = None
+        _ingest_job["messages_sent_before"] = msg_count_before
+        _ingest_job["messages_sent_current"] = 0
+        _ingest_job["error_msg"] = None
+
+    # Run ingest (blocking)
+    success, error_msg = _run_ingest_subprocess(source, container, actual_lookback)
+
+    # Capture final message count
+    msg_count_after = _get_kafka_message_count(topic)
+    messages_added = max(0, msg_count_after - msg_count_before)
+
+    with _ingest_job_lock:
+        _ingest_job["status"] = "done" if success else "error"
+        _ingest_job["ended_at"] = datetime.now(timezone.utc).isoformat()
+        _ingest_job["messages_sent_current"] = messages_added
+        if not success:
+          _ingest_job["error_msg"] = error_msg or "Ingest subprocess failed"
+
+
 def collect_metrics():
     errors = []
     now = datetime.now(timezone.utc)
@@ -493,6 +756,17 @@ def collect_metrics():
 
     persisted = (len(parquet_files) > 0) and (datanode_status.get("live_nodes", 0) > 0)
 
+    # Get current ingest job status
+    with _ingest_job_lock:
+        ingest_status = {
+            "status": _ingest_job["status"],
+            "source": _ingest_job["source"],
+            "started_at": _ingest_job["started_at"],
+            "ended_at": _ingest_job["ended_at"],
+            "messages_sent": _ingest_job["messages_sent_current"],
+            "error": _ingest_job["error_msg"],
+        }
+
     payload = {
         "polled_at_utc": now.isoformat(),
         "kafka": {
@@ -510,6 +784,7 @@ def collect_metrics():
         },
         "datanode": datanode_status,
         "persisted_to_datanode": persisted,
+        "ingest_job": ingest_status,
         "errors": errors,
     }
     return payload
@@ -518,6 +793,83 @@ def collect_metrics():
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/airflow/start-backfill", methods=["POST"])
+def api_airflow_start_backfill():
+  """Unpause and trigger the configured Airflow DAG with 7-day lookback."""
+  success, message, dag_run_id = _trigger_airflow_dag(lookback_days=7)
+  if not success:
+    return jsonify({"status": "error", "message": message}), 502
+  return jsonify({"status": "ok", "message": message, "dag_id": AIRFLOW_DAG_ID, "dag_run_id": dag_run_id}), 202
+
+
+@app.route("/api/ingest/trigger", methods=["POST"])
+def api_ingest_trigger():
+    """
+    Trigger ingest for a specific source (weather, openaq, sentinel5p, maiac).
+    Query params:
+      - source: (required) source name
+      - lookback_days: (optional) override default lookback days (default=7)
+    Returns: {status: "ok"|"error", message: "...", source: "..."}
+    """
+    source = request.args.get("source", "").strip().lower()
+    lookback_days_str = request.args.get("lookback_days", "").strip()
+    
+    if not source:
+        return jsonify({"status": "error", "message": "Missing 'source' query param"}), 400
+    
+    if source not in INGEST_SOURCES:
+        valid = ", ".join(INGEST_SOURCES.keys())
+        return jsonify({"status": "error", "message": f"Unknown source. Valid: {valid}"}), 400
+    
+    # Parse lookback_days if provided, otherwise use default
+    if lookback_days_str:
+        try:
+            lookback_days = int(lookback_days_str)
+        except ValueError:
+            return jsonify({"status": "error", "message": "lookback_days must be an integer"}), 400
+    else:
+        _, lookback_days, _ = INGEST_SOURCES[source]
+    
+    with _ingest_job_lock:
+        if _ingest_job["status"] == "running":
+            return jsonify({
+                "status": "error",
+                "message": f"Ingest already running for {_ingest_job['source']}"
+            }), 409
+    
+    # Start background thread
+    thread = threading.Thread(target=_run_ingest_thread, args=(source, lookback_days), daemon=False)
+    thread.start()
+    
+    with _ingest_job_lock:
+        _ingest_job["thread"] = thread
+    
+    logger.info(f"Started ingest thread for source={source}, lookback_days={lookback_days}")
+    return jsonify({
+        "status": "ok",
+        "message": f"Ingest started for {source} ({lookback_days} days)",
+        "source": source,
+        "lookback_days": lookback_days
+    }), 202
+
+
+@app.route("/api/ingest/status", methods=["GET"])
+def api_ingest_status():
+    """
+    Get current ingest job status.
+    Returns: {status: "idle"|"running"|"done"|"error", source, started_at, ended_at, messages_sent, error}
+    """
+    with _ingest_job_lock:
+        return jsonify({
+            "status": _ingest_job["status"],
+            "source": _ingest_job["source"],
+            "started_at": _ingest_job["started_at"],
+            "ended_at": _ingest_job["ended_at"],
+            "messages_sent": _ingest_job["messages_sent_current"],
+            "error": _ingest_job["error_msg"],
+        }), 200
 
 
 @app.route("/api/metrics")

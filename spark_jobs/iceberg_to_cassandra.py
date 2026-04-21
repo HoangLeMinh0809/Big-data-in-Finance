@@ -5,7 +5,7 @@ from typing import Iterable
 
 from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, to_date, to_timestamp, date_format
+from pyspark.sql.functions import col, to_date, to_timestamp, date_format, coalesce
 
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
 ICEBERG_CATALOG = "ais"
@@ -42,8 +42,14 @@ def build_spark_session() -> SparkSession:
 def enrich_weather(df: DataFrame) -> DataFrame:
     return (
         df
-        .withColumn("query_date", to_date(col("query_date"), "yyyy-MM-dd"))
-        .withColumn("event_time_ts", to_timestamp(col("time"), "yyyy-MM-dd HH:mm"))
+        .withColumn("query_date", to_date(col("query_date")))
+        .withColumn(
+            "event_time_ts",
+            coalesce(
+                to_timestamp(col("event_time")),
+                to_timestamp(col("time"), "yyyy-MM-dd HH:mm"),
+            ),
+        )
         .withColumn("day", date_format(col("query_date"), "yyyy-MM-dd"))
         .select(
             col("event_id"),
@@ -64,7 +70,7 @@ def enrich_weather(df: DataFrame) -> DataFrame:
             col("precip_mm"),
             col("condition_text"),
             col("source"),
-            col("ingest_time"),
+            col("ingest_time").cast("string").alias("ingest_time"),
         )
     )
 
@@ -72,7 +78,13 @@ def enrich_weather(df: DataFrame) -> DataFrame:
 def enrich_openaq(df: DataFrame) -> DataFrame:
     return (
         df
-        .withColumn("event_time_ts", to_timestamp(col("datetime_utc")))
+        .withColumn(
+            "event_time_ts",
+            coalesce(
+                to_timestamp(col("event_time")),
+                to_timestamp(col("datetime_utc")),
+            ),
+        )
         .withColumn("day", date_format(col("event_time_ts"), "yyyy-MM-dd"))
         .select(
             col("event_id"),
@@ -91,7 +103,7 @@ def enrich_openaq(df: DataFrame) -> DataFrame:
             col("sd"),
             col("coverage_pct"),
             col("source"),
-            col("ingest_time"),
+            col("ingest_time").cast("string").alias("ingest_time"),
         )
     )
 

@@ -56,15 +56,19 @@ function Submit-SparkJobDetached {
 
     docker exec namenode hdfs dfs -mkdir -p $HdfsDataDir | Out-Null
     docker exec namenode hdfs dfs -mkdir -p $HdfsCheckpointDir | Out-Null
-    docker exec namenode hdfs dfs -chmod -R 777 /data | Out-Null
-    docker exec namenode hdfs dfs -chmod -R 777 /checkpoints | Out-Null
+    docker exec namenode hdfs dfs -chmod -R 777 $HdfsDataDir | Out-Null
+    docker exec namenode hdfs dfs -chmod -R 777 $HdfsCheckpointDir | Out-Null
 
     docker exec -d spark-master /opt/spark/bin/spark-submit `
         --master spark://spark-master:7077 `
         --deploy-mode client `
         --name $AppName `
-        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1 `
+        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2 `
         --conf "spark.hadoop.fs.defaultFS=hdfs://namenode:9000" `
+        --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" `
+        --conf "spark.sql.catalog.ais=org.apache.iceberg.spark.SparkCatalog" `
+        --conf "spark.sql.catalog.ais.type=hadoop" `
+        --conf "spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg" `
         --conf "spark.sql.adaptive.enabled=true" `
         --conf "spark.driver.memory=1g" `
         --conf "spark.executor.memory=1g" `
@@ -83,21 +87,34 @@ Wait-ForHealthy -ContainerName "spark-master" -TimeoutSec 300
 Write-Host "=== [2/7] Create Kafka topics ==="
 Ensure-Topics
 
-Write-Host "=== [3/7] Start Spark streaming sinks (detached) ==="
-Submit-SparkJobDetached -AppName "WeatherHistory_Streaming" -JobFile "/opt/spark-jobs/weather_streaming.py" -HdfsDataDir "/data/weather_history" -HdfsCheckpointDir "/checkpoints/weather_history"
-Submit-SparkJobDetached -AppName "OpenAQHourly_Streaming" -JobFile "/opt/spark-jobs/openaq_hourly_streaming.py" -HdfsDataDir "/data/openaq_hourly" -HdfsCheckpointDir "/checkpoints/openaq_hourly"
-Submit-SparkJobDetached -AppName "Sentinel5PSummary_Streaming" -JobFile "/opt/spark-jobs/sentinel5p_summary_streaming.py" -HdfsDataDir "/data/sentinel5p_summary" -HdfsCheckpointDir "/checkpoints/sentinel5p_summary"
-Submit-SparkJobDetached -AppName "MAIACSummary_Streaming" -JobFile "/opt/spark-jobs/maiac_summary_streaming.py" -HdfsDataDir "/data/maiac_summary" -HdfsCheckpointDir "/checkpoints/maiac_summary"
+Write-Host "=== [3/8] Ensure Iceberg catalog/tables ==="
+docker exec spark-master /opt/spark/bin/spark-submit `
+    --master spark://spark-master:7077 `
+    --deploy-mode client `
+    --name "AIS_EnsureIcebergTables" `
+    --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2 `
+    --conf "spark.hadoop.fs.defaultFS=hdfs://namenode:9000" `
+    --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" `
+    --conf "spark.sql.catalog.ais=org.apache.iceberg.spark.SparkCatalog" `
+    --conf "spark.sql.catalog.ais.type=hadoop" `
+    --conf "spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg" `
+    /opt/spark-jobs/ensure_iceberg_tables.py | Out-Host
 
-Write-Host "=== [4/7] Historical backfill: Weather (last $lookbackDays days) ==="
+Write-Host "=== [4/8] Start Spark streaming sinks (detached) ==="
+Submit-SparkJobDetached -AppName "WeatherHistory_Streaming" -JobFile "/opt/spark-jobs/weather_streaming.py" -HdfsDataDir "/warehouse/iceberg/weather/weather_history_bronze" -HdfsCheckpointDir "/checkpoints/weather_history"
+Submit-SparkJobDetached -AppName "OpenAQHourly_Streaming" -JobFile "/opt/spark-jobs/openaq_hourly_streaming.py" -HdfsDataDir "/warehouse/iceberg/air_quality/openaq_hourly_bronze" -HdfsCheckpointDir "/checkpoints/openaq_hourly"
+Submit-SparkJobDetached -AppName "Sentinel5PSummary_Streaming" -JobFile "/opt/spark-jobs/sentinel5p_summary_streaming.py" -HdfsDataDir "/warehouse/iceberg/satellite/sentinel5p_summary_bronze" -HdfsCheckpointDir "/checkpoints/sentinel5p_summary"
+Submit-SparkJobDetached -AppName "MAIACSummary_Streaming" -JobFile "/opt/spark-jobs/maiac_summary_streaming.py" -HdfsDataDir "/warehouse/iceberg/satellite/maiac_summary_bronze" -HdfsCheckpointDir "/checkpoints/maiac_summary"
+
+Write-Host "=== [5/8] Historical backfill: Weather (last $lookbackDays days) ==="
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" ingest | Out-Host
 
-Write-Host "=== [5/7] Historical backfill: OpenAQ, Sentinel-5P, MAIAC ==="
+Write-Host "=== [6/8] Historical backfill: OpenAQ, Sentinel-5P, MAIAC ==="
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" openaq-ingest | Out-Host
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" sentinel5p-ingest | Out-Host
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" maiac-ingest | Out-Host
 
-Write-Host "=== [6/7] Start realtime loops for Weather + OpenAQ ==="
+Write-Host "=== [7/8] Start realtime loops for Weather + OpenAQ ==="
 $prevWeatherWindowMode = $env:WEATHER_WINDOW_MODE
 $prevWeatherRealtimeContinuous = $env:WEATHER_REALTIME_CONTINUOUS
 $prevWeatherRealtimeLookback = $env:WEATHER_REALTIME_LOOKBACK_MINUTES
@@ -117,7 +134,7 @@ $env:OPENAQ_REALTIME_LOOKBACK_MINUTES = "$realtimeLookbackMinutes"
 $env:OPENAQ_REALTIME_POLL_SECONDS = "$realtimePollSeconds"
 
 try {
-    docker compose up -d ingest openaq-ingest | Out-Host
+    docker compose -p atmospheric_intelligence_sys---ais up -d --no-recreate ingest openaq-ingest | Out-Host
 }
 finally {
     $env:WEATHER_WINDOW_MODE = $prevWeatherWindowMode
@@ -130,8 +147,15 @@ finally {
     $env:OPENAQ_REALTIME_POLL_SECONDS = $prevOpenaqRealtimePoll
 }
 
-Write-Host "=== [7/7] Start Airflow + monitoring UI ==="
-docker compose up -d airflow-postgres airflow-init airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui | Out-Host
+Write-Host "=== [8/8] Start Airflow + monitoring UI ==="
+docker compose up airflow-init | Out-Host
+try {
+    docker compose up -d airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui | Out-Host
+}
+catch {
+    Write-Host "[WARN] docker compose up failed, trying direct container start fallback..."
+    docker start airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui | Out-Host
+}
 
 Write-Host ""
 Write-Host "DONE. Pipeline status checks:"
