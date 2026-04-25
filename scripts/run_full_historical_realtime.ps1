@@ -7,6 +7,8 @@ Set-Location $rootDir
 $lookbackDays = if ($env:LOOKBACK_DAYS) { [int]$env:LOOKBACK_DAYS } else { 7 }
 $realtimeLookbackMinutes = if ($env:REALTIME_LOOKBACK_MINUTES) { [int]$env:REALTIME_LOOKBACK_MINUTES } else { 10 }
 $realtimePollSeconds = if ($env:REALTIME_POLL_SECONDS) { [int]$env:REALTIME_POLL_SECONDS } else { 600 }
+$enableAirflow = if ($env:ENABLE_AIRFLOW) { $env:ENABLE_AIRFLOW.ToLower() -eq "true" } else { $false }
+$enableMonitoring = if ($env:ENABLE_MONITORING) { $env:ENABLE_MONITORING.ToLower() -eq "true" } else { $false }
 
 function Wait-ForHealthy {
     param(
@@ -147,14 +149,33 @@ finally {
     $env:OPENAQ_REALTIME_POLL_SECONDS = $prevOpenaqRealtimePoll
 }
 
-Write-Host "=== [8/8] Start Airflow + monitoring UI ==="
-docker compose up airflow-init | Out-Host
-try {
-    docker compose up -d airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui | Out-Host
+Write-Host "=== [8/8] Optional services (Monitoring/Airflow) ==="
+if ($enableMonitoring) {
+    try {
+        docker compose up -d monitoring-ui | Out-Host
+    }
+    catch {
+        Write-Host "[WARN] docker compose up failed, trying direct container start fallback..."
+        docker start monitoring-ui | Out-Host
+    }
 }
-catch {
-    Write-Host "[WARN] docker compose up failed, trying direct container start fallback..."
-    docker start airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui | Out-Host
+else {
+    Write-Host "[INFO] Skip Monitoring UI startup (ENABLE_MONITORING=false)"
+}
+
+if ($enableAirflow) {
+    Write-Host "[INFO] ENABLE_AIRFLOW=true -> starting Airflow services"
+    docker compose up airflow-init | Out-Host
+    try {
+        docker compose up -d airflow-webserver airflow-scheduler airflow-triggerer | Out-Host
+    }
+    catch {
+        Write-Host "[WARN] docker compose up failed, trying direct container start fallback..."
+        docker start airflow-webserver airflow-scheduler airflow-triggerer | Out-Host
+    }
+}
+else {
+    Write-Host "[INFO] Skip Airflow startup (ENABLE_AIRFLOW=false)"
 }
 
 Write-Host ""
@@ -167,5 +188,9 @@ Write-Host ""
 Write-Host "UIs:"
 Write-Host "  NameNode:  http://localhost:9870"
 Write-Host "  Spark:     http://localhost:8080"
-Write-Host "  Airflow:   http://localhost:8088"
-Write-Host "  Monitor:   http://localhost:8501"
+if ($enableAirflow) {
+    Write-Host "  Airflow:   http://localhost:8088"
+}
+if ($enableMonitoring) {
+    Write-Host "  Monitor:   http://localhost:8501"
+}

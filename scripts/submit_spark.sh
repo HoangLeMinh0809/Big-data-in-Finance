@@ -35,6 +35,8 @@ KAFKA_TOPIC=""
 ICEBERG_TABLE=""
 CHECKPOINT_PATH=""
 PACKAGES="${ICEBERG_PACKAGES}"
+SPARK_CORES_MAX="${SPARK_CORES_MAX:-}"
+SPARK_EXECUTOR_CORES="${SPARK_EXECUTOR_CORES:-}"
 
 wait_for_hdfs_writable() {
   local timeout_sec="${1:-300}"
@@ -223,6 +225,9 @@ fi
 
 case "$JOB_TYPE" in
   weather|openaq|sentinel5p|maiac)
+    # Keep each streaming app lightweight so multiple consumers can run on a small local cluster.
+    SPARK_CORES_MAX="${SPARK_CORES_MAX:-1}"
+    SPARK_EXECUTOR_CORES="${SPARK_EXECUTOR_CORES:-1}"
     if [ "$STOP_AFTER_BATCH" = "true" ]; then
       STREAM_ARGS+=("--stop-after-batch" "1")
     fi
@@ -262,6 +267,14 @@ DOCKER_EXEC_ARGS+=("-e" "KAFKA_TOPIC=${KAFKA_TOPIC:-}")
 DOCKER_EXEC_ARGS+=("-e" "ICEBERG_TABLE=${ICEBERG_TABLE:-}")
 DOCKER_EXEC_ARGS+=("-e" "CHECKPOINT_PATH=${CHECKPOINT_PATH:-}")
 
+SPARK_EXTRA_CONF=()
+if [ -n "$SPARK_CORES_MAX" ]; then
+  SPARK_EXTRA_CONF+=(--conf "spark.cores.max=${SPARK_CORES_MAX}")
+fi
+if [ -n "$SPARK_EXECUTOR_CORES" ]; then
+  SPARK_EXTRA_CONF+=(--conf "spark.executor.cores=${SPARK_EXECUTOR_CORES}")
+fi
+
 docker exec "${DOCKER_EXEC_ARGS[@]}" spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
   --deploy-mode client \
@@ -279,6 +292,7 @@ docker exec "${DOCKER_EXEC_ARGS[@]}" spark-master /opt/spark/bin/spark-submit \
   --conf "spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg" \
   --conf "spark.cassandra.connection.host=cassandra" \
   --conf "spark.cassandra.connection.port=9042" \
+  "${SPARK_EXTRA_CONF[@]}" \
   "$JOB_FILE" "${JOB_ARGS[@]}" "${STREAM_ARGS[@]}"
 
 if [ "$DETACH" = "true" ]; then
