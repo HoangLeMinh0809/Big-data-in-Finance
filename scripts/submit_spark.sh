@@ -82,8 +82,8 @@ except Exception:
     sys.exit(1)
 
 for app in payload.get("activeapps", []):
-    if app.get("name") == app_name and app.get("state") in {"RUNNING", "WAITING"}:
-        sys.exit(0)
+  if app.get("name") == app_name and app.get("state") == "RUNNING":
+    sys.exit(0)
 
 sys.exit(1)
 PY

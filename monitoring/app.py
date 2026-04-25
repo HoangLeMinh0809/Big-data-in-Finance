@@ -20,6 +20,14 @@ app = Flask(__name__)
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_history")
+KAFKA_TOPICS = [
+  t.strip()
+  for t in os.getenv(
+    "KAFKA_TOPICS",
+    "weather_history,openaq-hourly,sentinel5p-summary,maiac-summary",
+  ).split(",")
+  if t.strip()
+]
 HDFS_WEBHDFS_BASE = os.getenv("HDFS_WEBHDFS_BASE", "http://namenode:9870/webhdfs/v1")
 HDFS_OUTPUT_PATH = os.getenv("HDFS_OUTPUT_PATH", "/warehouse/iceberg")
 NAMENODE_JMX_URL = os.getenv(
@@ -246,7 +254,7 @@ HTML_TEMPLATE = """
   <div class="wrap">
     <div class="hero">
       <h1>AIS Pipeline Live Monitor</h1>
-      <p>The page refreshes every 5 seconds and tracks Kafka flow plus HDFS/DataNode persistence.</p>
+      <p>Read-only dashboard, refresh every 5 seconds: Kafka flow, HDFS parquet persistence, DataNode health.</p>
     </div>
 
     <div class="grid">
@@ -256,7 +264,7 @@ HTML_TEMPLATE = """
         <div class="sub">messages / second</div>
       </div>
       <div class="card">
-        <div class="label">Kafka Total Messages</div>
+        <div class="label">Kafka Total Messages (All Topics)</div>
         <div class="value" id="kafka-total">-</div>
         <div class="sub" id="kafka-partitions">-</div>
       </div>
@@ -273,14 +281,21 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="section">
-      <h2>Run Airflow Backfill Loop</h2>
-      <p style="color: #6b7280; margin-bottom: 12px; font-size: 0.9rem;">
-        Start the Airflow DAG manually once. It will run now and continue on a 7-day cycle.
-      </p>
-      <button id="dag-trigger-btn" onclick="triggerAirflowBackfill()" style="padding: 12px 14px; width: 100%; background: #0f766e; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 700;">
-        Start 7-Day Backfill DAG
-      </button>
-      <div id="dag-trigger-status" style="margin-top: 12px; padding: 10px; background: #f3f4f6; border-radius: 8px; font-size: 0.9rem; color: #1f2937; display: none;"></div>
+      <h2>Kafka Topic Metrics</h2>
+      <table class="table" id="kafka-topic-table">
+        <thead>
+          <tr>
+            <th>Topic</th>
+            <th>Messages</th>
+            <th>Partitions</th>
+          </tr>
+        </thead>
+        <tbody id="kafka-topic-body">
+          <tr>
+            <td colspan="3">Loading...</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="section">
@@ -353,9 +368,19 @@ HTML_TEMPLATE = """
 
       document.getElementById('kafka-throughput').textContent = Number(kafka.throughput_mps || 0).toFixed(2);
       document.getElementById('kafka-total').textContent = String(kafka.messages_total ?? '-');
-      document.getElementById('kafka-partitions').textContent = `Partitions: ${kafka.partitions ?? '-'}`;
+      document.getElementById('kafka-partitions').textContent = `Topics: ${kafka.topic_count ?? '-'} | Partitions: ${kafka.partitions ?? '-'}`;
       document.getElementById('hdfs-files').textContent = String(hdfs.parquet_files ?? '-');
       document.getElementById('hdfs-size').textContent = `Total size: ${humanBytes(hdfs.total_size_bytes)}`;
+
+      const topicRows = Array.isArray(kafka.topics) ? kafka.topics : [];
+      const body = document.getElementById('kafka-topic-body');
+      if (!topicRows.length) {
+        body.innerHTML = '<tr><td colspan="3">No topic data</td></tr>';
+      } else {
+        body.innerHTML = topicRows
+          .map((row) => `<tr><td>${row.topic}</td><td>${row.messages_total}</td><td>${row.partitions}</td></tr>`)
+          .join('');
+      }
 
       const persisted = payload.persisted_to_datanode;
       const persistedHtml = persisted
@@ -378,41 +403,6 @@ HTML_TEMPLATE = """
 
     loadMetrics();
     setInterval(loadMetrics, 5000);
-  </script>
-
-  <script>
-    async function triggerAirflowBackfill() {
-      const statusDiv = document.getElementById('dag-trigger-status');
-      const button = document.getElementById('dag-trigger-btn');
-
-      statusDiv.style.display = 'block';
-      statusDiv.textContent = 'Calling Airflow API to unpause + trigger DAG...';
-      statusDiv.style.background = '#fef3c7';
-      statusDiv.style.color = '#92400e';
-      button.disabled = true;
-      button.style.opacity = '0.7';
-
-      try {
-        const res = await fetch('/api/airflow/start-backfill', { method: 'POST' });
-        const data = await res.json();
-        if (res.ok && data.status === 'ok') {
-          statusDiv.textContent = `DAG triggered: ${data.dag_run_id}. Next cycles run every 7 days.`;
-          statusDiv.style.background = '#dcfce7';
-          statusDiv.style.color = '#166534';
-        } else {
-          statusDiv.textContent = `Failed to trigger DAG: ${data.message || data.error || 'Unknown error'}`;
-          statusDiv.style.background = '#fee2e2';
-          statusDiv.style.color = '#b91c1c';
-        }
-      } catch (err) {
-        statusDiv.textContent = `Error: ${err.message}`;
-        statusDiv.style.background = '#fee2e2';
-        statusDiv.style.color = '#b91c1c';
-      } finally {
-        button.disabled = false;
-        button.style.opacity = '1';
-      }
-    }
   </script>
 </body>
 </html>
@@ -499,25 +489,25 @@ def _walk_hdfs(path):
     return files
 
 
-def _collect_kafka_totals():
-    admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, client_id="monitoring-admin")
-    try:
-        topic_meta = admin.describe_topics([KAFKA_TOPIC])
-        partitions = [p["partition"] for p in topic_meta[0].get("partitions", [])]
-    finally:
-        admin.close()
+def _collect_kafka_totals(topic: str):
+  admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, client_id="monitoring-admin")
+  try:
+    topic_meta = admin.describe_topics([topic])
+    partitions = [p["partition"] for p in topic_meta[0].get("partitions", [])]
+  finally:
+    admin.close()
 
-    if not partitions:
-        return 0, 0
+  if not partitions:
+    return 0, 0
 
-    consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, group_id=None, enable_auto_commit=False)
-    try:
-        topic_partitions = [TopicPartition(KAFKA_TOPIC, p) for p in partitions]
-        end_offsets = consumer.end_offsets(topic_partitions)
-        messages_total = sum(end_offsets.get(tp, 0) for tp in topic_partitions)
-        return int(messages_total), len(partitions)
-    finally:
-        consumer.close()
+  consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, group_id=None, enable_auto_commit=False)
+  try:
+    topic_partitions = [TopicPartition(topic, p) for p in partitions]
+    end_offsets = consumer.end_offsets(topic_partitions)
+    messages_total = sum(end_offsets.get(tp, 0) for tp in topic_partitions)
+    return int(messages_total), len(partitions)
+  finally:
+    consumer.close()
 
 
 def _collect_datanode_status():
@@ -720,10 +710,27 @@ def collect_metrics():
         "decommissioning_nodes": 0,
     }
 
+    kafka_topic_rows = []
     try:
-        messages_total, partitions = _collect_kafka_totals()
+      topics = KAFKA_TOPICS or [KAFKA_TOPIC]
+      total_messages = 0
+      total_partitions = 0
+      for topic in topics:
+        topic_messages, topic_partitions = _collect_kafka_totals(topic)
+        kafka_topic_rows.append(
+          {
+            "topic": topic,
+            "messages_total": int(topic_messages),
+            "partitions": int(topic_partitions),
+          }
+        )
+        total_messages += topic_messages
+        total_partitions += topic_partitions
+
+      messages_total = int(total_messages)
+      partitions = int(total_partitions)
     except Exception as exc:
-        errors.append(f"Kafka metrics error: {exc}")
+      errors.append(f"Kafka metrics error: {exc}")
 
     with _state_lock:
         prev_ts = _last_sample["timestamp"]
@@ -770,7 +777,9 @@ def collect_metrics():
     payload = {
         "polled_at_utc": now.isoformat(),
         "kafka": {
-            "topic": KAFKA_TOPIC,
+          "topic": KAFKA_TOPIC,
+          "topic_count": len(kafka_topic_rows),
+          "topics": kafka_topic_rows,
             "messages_total": messages_total,
             "partitions": partitions,
             "throughput_mps": round(throughput_mps, 3),
