@@ -20,6 +20,8 @@ REALTIME_POLL_SECONDS="${REALTIME_POLL_SECONDS:-600}"
 RESET_STREAM_CHECKPOINTS="${RESET_STREAM_CHECKPOINTS:-true}"
 STREAM_PROCESSING_TIME="${STREAM_PROCESSING_TIME:-30 seconds}"
 BOOTSTRAP_STARTING_OFFSETS="${BOOTSTRAP_STARTING_OFFSETS:-earliest}"
+ENABLE_AIRFLOW="${ENABLE_AIRFLOW:-false}"
+ENABLE_MONITORING="${ENABLE_MONITORING:-false}"
 
 unset STOP_AFTER_BATCH || true
 
@@ -40,10 +42,86 @@ except Exception:
     sys.exit(1)
 
 for app in payload.get("activeapps", []):
-    if app.get("name") == app_name and app.get("state") in {"RUNNING", "WAITING"}:
+  if app.get("name") == app_name and app.get("state") == "RUNNING":
         sys.exit(0)
 
 sys.exit(1)
+PY
+}
+
+spark_app_state() {
+  local app_name="$1"
+
+  docker exec -i -e APP_NAME="$app_name" spark-master python3 - <<'PY'
+import json
+import os
+import urllib.request
+
+app_name = os.environ.get("APP_NAME", "")
+try:
+  raw = urllib.request.urlopen("http://localhost:8080/json", timeout=10).read().decode("utf-8")
+  payload = json.loads(raw)
+except Exception:
+  raise SystemExit(0)
+
+for app in payload.get("activeapps", []):
+  if app.get("name") == app_name:
+    print(app.get("state", "UNKNOWN"))
+    raise SystemExit(0)
+PY
+}
+
+spark_app_present() {
+  local app_name="$1"
+
+  docker exec -i -e APP_NAME="$app_name" spark-master python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+app_name = os.environ.get("APP_NAME", "")
+try:
+  raw = urllib.request.urlopen("http://localhost:8080/json", timeout=10).read().decode("utf-8")
+  payload = json.loads(raw)
+except Exception:
+  sys.exit(1)
+
+for app in payload.get("activeapps", []):
+  if app.get("name") == app_name:
+    sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+print_spark_cluster_snapshot() {
+  docker exec -i spark-master python3 - <<'PY'
+import json
+import urllib.request
+
+try:
+  raw = urllib.request.urlopen("http://localhost:8080/json", timeout=10).read().decode("utf-8")
+  payload = json.loads(raw)
+except Exception as exc:
+  print(f"[WARN] Unable to query Spark master state: {exc}")
+  raise SystemExit(0)
+
+print("[INFO] Spark active apps:")
+for app in payload.get("activeapps", []):
+  print(f"  - {app.get('name')} ({app.get('id')}): state={app.get('state')} cores={app.get('cores')}")
+
+print("[INFO] Spark workers:")
+for worker in payload.get("workers", []):
+  print(
+    "  - {wid}: coresUsed={used}/{total} memUsedMB={mused}/{mtotal}".format(
+      wid=worker.get("id"),
+      used=worker.get("coresused"),
+      total=worker.get("cores"),
+      mused=worker.get("memoryused"),
+      mtotal=worker.get("memory"),
+    )
+  )
 PY
 }
 
@@ -86,15 +164,34 @@ kill_spark_app_by_name() {
       org.apache.spark.deploy.Client kill spark://spark-master:7077 "$app_id" || true
   done <<< "$ids"
 
+  # Fallback for client-mode detached drivers that may survive app-id kill.
+  docker exec spark-master sh -lc "pkill -f -- '--name ${app_name}'" >/dev/null 2>&1 || true
+
   local elapsed=0
   local timeout_sec=60
-  while spark_app_registered "$app_name"; do
+  while spark_app_present "$app_name"; do
     if [ "$elapsed" -ge "$timeout_sec" ]; then
       echo "[WARN] Spark app still visible after kill timeout: ${app_name}"
       break
     fi
     sleep 3
     elapsed=$((elapsed + 3))
+  done
+}
+
+ensure_exclusive_stream_resources() {
+  local target_app="$1"
+  local stream_apps=(
+    "WeatherHistory_Streaming"
+    "OpenAQHourly_Streaming"
+    "Sentinel5PSummary_Streaming"
+    "MAIACSummary_Streaming"
+  )
+
+  for app in "${stream_apps[@]}"; do
+    if [ "$app" != "$target_app" ]; then
+      kill_spark_app_by_name "$app"
+    fi
   done
 }
 
@@ -113,22 +210,47 @@ ensure_spark_app_active() {
 
   while [ "$attempt" -le "$attempts" ]; do
     local elapsed=0
+    local submitted_this_attempt=false
 
-    echo "[WARN] Spark app not active, submitting (attempt ${attempt}/${attempts}): ${app_name}"
-    KAFKA_STARTING_OFFSETS="$starting_offsets" \
-    DETACH=true \
-    STOP_AFTER_BATCH=false \
-    PROCESSING_TIME="$STREAM_PROCESSING_TIME" \
-      bash scripts/submit_spark.sh "$job_type"
+    if spark_app_present "$app_name"; then
+      local existing_state
+      existing_state="$(spark_app_state "$app_name" || true)"
+      echo "[WARN] Spark app already present (state=${existing_state:-UNKNOWN}), waiting instead of duplicate submit: ${app_name}"
+    else
+      echo "[WARN] Spark app not active, submitting (attempt ${attempt}/${attempts}): ${app_name}"
+      KAFKA_STARTING_OFFSETS="$starting_offsets" \
+      DETACH=true \
+      STOP_AFTER_BATCH=false \
+      PROCESSING_TIME="$STREAM_PROCESSING_TIME" \
+        bash scripts/submit_spark.sh "$job_type"
+      submitted_this_attempt=true
+    fi
 
     while [ "$elapsed" -lt "$timeout_sec" ]; do
       if spark_app_registered "$app_name"; then
         echo "[OK] Spark app became active: ${app_name}"
         return 0
       fi
+
+      local state
+      state="$(spark_app_state "$app_name" || true)"
+      if [ "$state" = "WAITING" ]; then
+        echo "[WAIT] Spark app is WAITING for resources: ${app_name}"
+      fi
+
       sleep 5
       elapsed=$((elapsed + 5))
     done
+
+    if spark_app_present "$app_name"; then
+      echo "[WARN] Spark app did not reach RUNNING; terminating stale instance before retry: ${app_name}"
+      kill_spark_app_by_name "$app_name"
+    elif [ "$submitted_this_attempt" = "false" ]; then
+      echo "[WARN] Spark app disappeared while waiting; will retry submit: ${app_name}"
+    fi
+
+    echo "[WARN] Spark app state snapshot after timeout for ${app_name}:"
+    print_spark_cluster_snapshot
 
     attempt=$((attempt + 1))
   done
@@ -168,7 +290,8 @@ wait_for_hdfs_parquet() {
   local elapsed=0
 
   while true; do
-    if docker exec namenode bash -lc "hdfs dfs -ls -R '$hdfs_path' 2>/dev/null | grep -q '\.parquet$'"; then
+    # Use awk instead of grep -q to avoid pipefail false negatives on early pipe close.
+    if docker exec namenode hdfs dfs -ls -R "$hdfs_path" 2>/dev/null | awk '/\.parquet$/ { found=1 } END { exit(found ? 0 : 1) }'; then
       echo "[OK] Found parquet under ${hdfs_path}"
       return 0
     fi
@@ -212,18 +335,28 @@ bash "$SCRIPT_DIR/create_topics.sh"
 echo "=== [4/9] Ensure Iceberg catalog/tables ==="
 bash scripts/submit_spark.sh ensure-iceberg
 
-echo "=== [5/9] Start Spark streaming sinks FIRST (bootstrap with earliest) ==="
-ensure_spark_app_active "WeatherHistory_Streaming" "weather" "$BOOTSTRAP_STARTING_OFFSETS"
-ensure_spark_app_active "OpenAQHourly_Streaming" "openaq" "$BOOTSTRAP_STARTING_OFFSETS"
-ensure_spark_app_active "Sentinel5PSummary_Streaming" "sentinel5p" "$BOOTSTRAP_STARTING_OFFSETS"
-ensure_spark_app_active "MAIACSummary_Streaming" "maiac" "$BOOTSTRAP_STARTING_OFFSETS"
+echo "=== [5/9] Prepare Spark streaming consumers (on-demand per source) ==="
 
-echo "=== [6/9] Start Airflow + Monitoring ==="
-docker compose up airflow-init
-docker compose up -d airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui || \
-docker start airflow-webserver airflow-scheduler airflow-triggerer monitoring-ui
+echo "=== [6/9] Optional services (Monitoring/Airflow) ==="
+if [ "$ENABLE_MONITORING" = "true" ]; then
+  docker compose up -d monitoring-ui || docker start monitoring-ui
+else
+  echo "[INFO] Skip Monitoring UI startup (ENABLE_MONITORING=${ENABLE_MONITORING})"
+fi
+
+if [ "$ENABLE_AIRFLOW" = "true" ]; then
+  echo "[INFO] ENABLE_AIRFLOW=true -> starting Airflow services"
+  docker compose up airflow-init
+  docker compose up -d airflow-webserver airflow-scheduler airflow-triggerer || \
+  docker start airflow-webserver airflow-scheduler airflow-triggerer
+else
+  echo "[INFO] Skip Airflow startup (ENABLE_AIRFLOW=${ENABLE_AIRFLOW})"
+fi
 
 echo "=== [7/9] Historical backfill: Sentinel-5P ==="
+ensure_exclusive_stream_resources "Sentinel5PSummary_Streaming"
+ensure_spark_app_active "Sentinel5PSummary_Streaming" "sentinel5p" "$BOOTSTRAP_STARTING_OFFSETS"
+
 docker compose run --rm \
   --no-deps \
   -e WINDOW_MODE=batch \
@@ -231,8 +364,12 @@ docker compose run --rm \
   sentinel5p-ingest
 
 wait_for_hdfs_parquet "/warehouse/iceberg/satellite/sentinel5p_summary_bronze" 300
+kill_spark_app_by_name "Sentinel5PSummary_Streaming"
 
 echo "=== [8/9] Historical backfill: MAIAC ==="
+ensure_exclusive_stream_resources "MAIACSummary_Streaming"
+ensure_spark_app_active "MAIACSummary_Streaming" "maiac" "$BOOTSTRAP_STARTING_OFFSETS"
+
 docker compose run --rm \
   --no-deps \
   -e WINDOW_MODE=batch \
@@ -240,8 +377,12 @@ docker compose run --rm \
   maiac-ingest
 
 wait_for_hdfs_parquet "/warehouse/iceberg/satellite/maiac_summary_bronze" 300
+kill_spark_app_by_name "MAIACSummary_Streaming"
 
 echo "=== [9/9] Historical backfill: Weather ==="
+ensure_exclusive_stream_resources "WeatherHistory_Streaming"
+ensure_spark_app_active "WeatherHistory_Streaming" "weather" "$BOOTSTRAP_STARTING_OFFSETS"
+
 docker compose run --rm \
   --no-deps \
   -e WINDOW_MODE=batch \
@@ -251,6 +392,9 @@ docker compose run --rm \
 wait_for_hdfs_parquet "/warehouse/iceberg/weather/weather_history_bronze" 300
 
 echo "=== [10/9] Historical backfill: OpenAQ ==="
+ensure_exclusive_stream_resources "OpenAQHourly_Streaming"
+ensure_spark_app_active "OpenAQHourly_Streaming" "openaq" "$BOOTSTRAP_STARTING_OFFSETS"
+
 docker compose run --rm \
   --no-deps \
   -e WINDOW_MODE=batch \
@@ -280,5 +424,9 @@ echo
 echo "UIs:"
 echo "  NameNode:  http://localhost:9870"
 echo "  Spark:     http://localhost:8080"
-echo "  Airflow:   http://localhost:8088"
-echo "  Monitor:   http://localhost:8501"
+if [ "$ENABLE_AIRFLOW" = "true" ]; then
+  echo "  Airflow:   http://localhost:8088"
+fi
+if [ "$ENABLE_MONITORING" = "true" ]; then
+  echo "  Monitor:   http://localhost:8501"
+fi
