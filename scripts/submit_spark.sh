@@ -12,6 +12,8 @@
 # =============================================================================
 
 set -euo pipefail
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
 
 JOB_TYPE="${1:-weather}"
 DETACH="${DETACH:-false}"
@@ -21,8 +23,8 @@ KAFKA_STARTING_OFFSETS="${KAFKA_STARTING_OFFSETS:-latest}"
 SPARK_JARS_IVY="${SPARK_JARS_IVY:-/root/.ivy2}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-atmospheric_intelligence_sys---ais}"
 
-KAFKA_HADOOP_PACKAGES="org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1"
-ICEBERG_PACKAGES="${KAFKA_HADOOP_PACKAGES},org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2"
+KAFKA_HADOOP_PACKAGES="org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-client:3.3.4"
+ICEBERG_PACKAGES="${KAFKA_HADOOP_PACKAGES},org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
 CASSANDRA_PACKAGES="${ICEBERG_PACKAGES},com.datastax.spark:spark-cassandra-connector_2.12:3.5.1"
 
 APP_NAME=""
