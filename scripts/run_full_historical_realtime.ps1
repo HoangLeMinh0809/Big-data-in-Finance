@@ -38,7 +38,7 @@ function Wait-ForHealthy {
     }
 }
 
-function Ensure-Topics {
+function Initialize-Topics {
     $topics = @("openaq-hourly", "weather_history", "sentinel5p-summary", "maiac-summary")
 
     Write-Host "=== Create AIS Kafka topics ==="
@@ -87,7 +87,7 @@ Wait-ForHealthy -ContainerName "namenode" -TimeoutSec 300
 Wait-ForHealthy -ContainerName "spark-master" -TimeoutSec 300
 
 Write-Host "=== [2/7] Create Kafka topics ==="
-Ensure-Topics
+Initialize-Topics
 
 Write-Host "=== [3/8] Ensure Iceberg catalog/tables ==="
 docker exec spark-master /opt/spark/bin/spark-submit `
