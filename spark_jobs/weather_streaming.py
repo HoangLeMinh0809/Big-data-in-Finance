@@ -1,41 +1,44 @@
-"""\
-=============================================================================
-Weather History — Spark Structured Streaming Job
-=============================================================================
-Chuc nang:
-    1. Doc stream tu Kafka topic "weather_history"
-    2. Parse JSON message theo schema output cua ingest_weather
-    3. Cast mot so truong thoi gian/phong van
-    4. Them cot partition: year, month (dua tren query_date)
-    5. Ghi Iceberg table tren HDFS warehouse
-    6. Su dung checkpoint de dam bao exactly-once
 """
+Weather history Kafka -> Iceberg streaming processor.
+
+Default mode is long-running streaming.
+Use --stop-after-batch 1 for bootstrap/backfill catchup runs.
+"""
+
+from __future__ import annotations
+
+import os
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    from_json,
     col,
-    year as spark_year,
+    from_json,
     month as spark_month,
     to_date,
     to_timestamp,
-    current_timestamp,
+    year as spark_year,
 )
 from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
     DoubleType,
-    LongType,
     IntegerType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
 )
 
-KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
-KAFKA_TOPIC = "weather_history"
-CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/weather_history/"
-ICEBERG_CATALOG = "ais"
-ICEBERG_WAREHOUSE = "hdfs://namenode:9000/warehouse/iceberg"
-ICEBERG_TABLE = f"{ICEBERG_CATALOG}.weather.weather_history_bronze"
+from hanoi_config import get_table_names
+from runtime_utils import apply_stream_trigger, parse_streaming_runtime
+
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_history")
+KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "latest")
+CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "hdfs://namenode:9000/checkpoints/weather_history/")
+ICEBERG_CATALOG = os.getenv("ICEBERG_CATALOG", "ais")
+ICEBERG_WAREHOUSE = os.getenv("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg")
+
+TABLE_NAMES = get_table_names()
+ICEBERG_TABLE = os.getenv("ICEBERG_TABLE", TABLE_NAMES["weather_bronze"])
 
 WEATHER_SCHEMA = StructType(
     [
@@ -94,10 +97,72 @@ WEATHER_SCHEMA = StructType(
     ]
 )
 
+WEATHER_TABLE_COLUMNS = [
+    "event_id",
+    "province",
+    "country",
+    "region",
+    "location_name",
+    "lat",
+    "lon",
+    "tz_id",
+    "query_date",
+    "time",
+    "event_time",
+    "time_epoch",
+    "is_day",
+    "temp_c",
+    "temp_f",
+    "feelslike_c",
+    "feelslike_f",
+    "windchill_c",
+    "windchill_f",
+    "heatindex_c",
+    "heatindex_f",
+    "dewpoint_c",
+    "dewpoint_f",
+    "condition_text",
+    "condition_code",
+    "condition_icon",
+    "wind_mph",
+    "wind_kph",
+    "wind_degree",
+    "wind_dir",
+    "gust_mph",
+    "gust_kph",
+    "pressure_mb",
+    "pressure_in",
+    "precip_mm",
+    "precip_in",
+    "snow_cm",
+    "humidity",
+    "cloud",
+    "vis_km",
+    "vis_miles",
+    "uv",
+    "will_it_rain",
+    "chance_of_rain",
+    "will_it_snow",
+    "chance_of_snow",
+    "source",
+    "source_file",
+    "ingest_time",
+    "window_mode",
+    "window_start_utc",
+    "window_end_utc",
+    "window_now_utc",
+    "spark_processed_at",
+    "year",
+    "month",
+]
 
-def main():
+
+def main() -> None:
+    stop_after_batch, processing_time = parse_streaming_runtime(default_processing_time="30 seconds")
+
     spark = (
-        SparkSession.builder.appName("WeatherHistory_Streaming")
+        SparkSession.builder
+        .appName("WeatherHistory_Streaming")
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
         .config(f"spark.sql.catalog.{ICEBERG_CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
         .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.type", "hadoop")
@@ -110,23 +175,26 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
 
     kafka_df = (
-        spark.readStream.format("kafka")
+        spark.readStream
+        .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
         .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "earliest")
+        .option("startingOffsets", KAFKA_STARTING_OFFSETS)
         .option("failOnDataLoss", "false")
         .option("maxOffsetsPerTrigger", 10000)
         .load()
     )
 
     parsed_df = (
-        kafka_df.selectExpr("CAST(key AS STRING) AS kafka_key", "CAST(value AS STRING) AS json_str")
+        kafka_df
+        .selectExpr("CAST(key AS STRING) AS kafka_key", "CAST(value AS STRING) AS json_str")
         .select(col("kafka_key"), from_json(col("json_str"), WEATHER_SCHEMA).alias("data"))
         .select("data.*")
     )
 
     final_df = (
-        parsed_df.withColumn("query_date", to_date(col("query_date"), "yyyy-MM-dd"))
+        parsed_df
+        .withColumn("query_date", to_date(col("query_date"), "yyyy-MM-dd"))
         .withColumn("event_time", to_timestamp(col("time"), "yyyy-MM-dd HH:mm"))
         .withColumn("ingest_time", to_timestamp(col("ingest_time")))
         .withColumn("window_start_utc", to_timestamp(col("window_start_utc")))
@@ -134,29 +202,90 @@ def main():
         .withColumn("window_now_utc", to_timestamp(col("window_now_utc")))
         .withColumn("year", spark_year(col("query_date")))
         .withColumn("month", spark_month(col("query_date")))
-        .withColumn("spark_processed_at", current_timestamp())
+        .withColumn("spark_processed_at", col("ingest_time").cast("timestamp"))
+        .select(*WEATHER_TABLE_COLUMNS)
     )
 
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")
-    if not spark.catalog.tableExists(ICEBERG_TABLE):
-        (
-            final_df.limit(0)
-            .writeTo(ICEBERG_TABLE)
-            .using("iceberg")
-            .tableProperty("format-version", "2")
-            .partitionedBy(col("year"), col("month"))
-            .create()
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_TABLE} (
+            event_id STRING,
+            province STRING,
+            country STRING,
+            region STRING,
+            location_name STRING,
+            lat DOUBLE,
+            lon DOUBLE,
+            tz_id STRING,
+            query_date DATE,
+            time STRING,
+            event_time TIMESTAMP,
+            time_epoch BIGINT,
+            is_day INT,
+            temp_c DOUBLE,
+            temp_f DOUBLE,
+            feelslike_c DOUBLE,
+            feelslike_f DOUBLE,
+            windchill_c DOUBLE,
+            windchill_f DOUBLE,
+            heatindex_c DOUBLE,
+            heatindex_f DOUBLE,
+            dewpoint_c DOUBLE,
+            dewpoint_f DOUBLE,
+            condition_text STRING,
+            condition_code INT,
+            condition_icon STRING,
+            wind_mph DOUBLE,
+            wind_kph DOUBLE,
+            wind_degree INT,
+            wind_dir STRING,
+            gust_mph DOUBLE,
+            gust_kph DOUBLE,
+            pressure_mb DOUBLE,
+            pressure_in DOUBLE,
+            precip_mm DOUBLE,
+            precip_in DOUBLE,
+            snow_cm DOUBLE,
+            humidity INT,
+            cloud INT,
+            vis_km DOUBLE,
+            vis_miles DOUBLE,
+            uv DOUBLE,
+            will_it_rain INT,
+            chance_of_rain INT,
+            will_it_snow INT,
+            chance_of_snow INT,
+            source STRING,
+            source_file STRING,
+            ingest_time TIMESTAMP,
+            window_mode STRING,
+            window_start_utc TIMESTAMP,
+            window_end_utc TIMESTAMP,
+            window_now_utc TIMESTAMP,
+            spark_processed_at TIMESTAMP,
+            year INT,
+            month INT
         )
-
-    query = (
-        final_df.writeStream.format("iceberg")
-        .outputMode("append")
-        .option("checkpointLocation", CHECKPOINT_PATH)
-        .trigger(availableNow=True)
-        .queryName("weather_history_to_iceberg")
-        .toTable(ICEBERG_TABLE)
+        USING ICEBERG
+        PARTITIONED BY (year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
     )
 
+    writer = (
+        final_df.writeStream
+        .format("iceberg")
+        .outputMode("append")
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .queryName("weather_history_to_iceberg")
+    )
+
+    writer = apply_stream_trigger(writer, stop_after_batch=stop_after_batch, processing_time=processing_time)
+    query = writer.toTable(ICEBERG_TABLE)
+
+    print(f"Weather stream mode: {'availableNow' if stop_after_batch else processing_time}")
+    print(f"Kafka startingOffsets: {KAFKA_STARTING_OFFSETS}")
     query.awaitTermination()
 
 
