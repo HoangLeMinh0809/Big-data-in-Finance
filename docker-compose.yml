@@ -122,6 +122,7 @@ services:
     volumes:
       - ./spark_jobs:/opt/spark-jobs
       - ./checkpoints:/opt/checkpoints
+      - ./crawler/maiac_data:/opt/maiac_data:ro
       - spark_ivy_cache:/root/.ivy2
     networks:
       - bigdata-net
@@ -144,6 +145,7 @@ services:
     volumes:
       - ./spark_jobs:/opt/spark-jobs
       - ./checkpoints:/opt/checkpoints
+      - ./crawler/maiac_data:/opt/maiac_data:ro
       - spark_ivy_cache:/root/.ivy2
     networks:
       - bigdata-net

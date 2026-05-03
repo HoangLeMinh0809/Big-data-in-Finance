@@ -25,6 +25,8 @@ def ensure_tables(spark: SparkSession) -> None:
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality")
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.satellite")
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.features")
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.models")
 
     spark.sql(
         f"""
@@ -202,12 +204,64 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.weather_hanoi_surface_proxy_silver (
+            hour TIMESTAMP,
+            vis_km DOUBLE,
+            uv DOUBLE,
+            condition_code INT,
+            condition_text STRING,
+            is_day INT,
+            will_it_rain INT,
+            chance_of_rain INT,
+            will_it_snow INT,
+            chance_of_snow INT,
+            source STRING,
+            ingest_time TIMESTAMP,
+            spark_processed_at TIMESTAMP,
+            year INT,
+            month INT,
+            day INT
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.maiac_hanoi_daily_silver (
+            date DATE,
+            aod_047_mean DOUBLE,
+            aod_055_mean DOUBLE,
+            aod_mean DOUBLE,
+            aod_min DOUBLE,
+            aod_max DOUBLE,
+            aod_std DOUBLE,
+            valid_pixel_count INT,
+            total_pixel_count INT,
+            valid_pct DOUBLE,
+            tile_count INT,
+            source_files ARRAY<STRING>,
+            year INT,
+            month INT,
+            day INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
 
 def main() -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
     ensure_tables(spark)
-    print("Ensured Iceberg namespaces and tables for weather, openaq, sentinel5p, maiac")
+    print("Ensured Iceberg namespaces and tables for weather, openaq, sentinel5p, maiac, hanoi silver")
     spark.stop()
 
 
