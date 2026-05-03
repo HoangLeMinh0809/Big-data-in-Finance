@@ -165,6 +165,12 @@ services:
       KAFKA_TOPIC: weather_history
       KAFKA_CONNECT_MAX_RETRIES: "120"
       KAFKA_CONNECT_RETRY_DELAY: "5"
+      # ERA5 ingest defaults (used by ingest/era5_ingest.py when submitted via scripts/submit_spark.sh era5-ingest)
+      ERA5_START_DATE: ${ERA5_START_DATE:-}
+      ERA5_END_DATE: ${ERA5_END_DATE:-}
+      ERA5_DATASET_TYPE: ${ERA5_DATASET_TYPE:-surface}
+      ERA5_OUTPUT_BASE_PATH: ${ERA5_OUTPUT_BASE_PATH:-}
+      ERA5_SKIP_EXISTING: ${ERA5_SKIP_EXISTING:-true}
       SOURCE_MODE: ${WEATHER_SOURCE_MODE:-api}
       WEATHER_API_KEY: ${WEATHER_API_KEY:-}
       WEATHER_QUERY_LIST: "${WEATHER_QUERY_LIST:-}"

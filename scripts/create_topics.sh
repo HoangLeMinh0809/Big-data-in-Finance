@@ -10,6 +10,7 @@ TOPICS=(
   "openaq-hourly"
   "sentinel5p-summary"
   "maiac-summary"
+  "era5-files"
 )
 
 echo "=== Create AIS Kafka topics ==="
