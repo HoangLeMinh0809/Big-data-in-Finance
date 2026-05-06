@@ -352,6 +352,7 @@ services:
       PRODUCTS: "NO2,CO,O3,SO2,CH4,AER"
     volumes:
       - ./checkpoints:/opt/checkpoints
+      - ./data/crawling/outputs:/app/data/crawling/outputs:ro
     command: ["python", "-u", "sentinel5p_ingest.py"]
     networks:
       - bigdata-net

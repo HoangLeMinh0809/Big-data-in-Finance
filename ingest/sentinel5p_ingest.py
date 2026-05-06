@@ -9,9 +9,11 @@ Window modes: batch (historical) or realtime (continuous/polling)
 """
 
 import logging
+import json
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 
@@ -91,6 +93,12 @@ PRODUCTS_DEF = {
 # =============================================================================
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "sentinel5p-summary")
+LOCAL_METADATA_PATH = Path(
+    os.getenv(
+        "SENTINEL5P_LOCAL_METADATA_PATH",
+        "data/crawling/outputs/sentinel5p_vietnam_last_3d.json",
+    )
+)
 
 CDSE_USERNAME = os.getenv("CDSE_USERNAME", "").strip()
 CDSE_PASSWORD = os.getenv("CDSE_PASSWORD", "").strip()
@@ -146,6 +154,20 @@ def to_odata_datetime(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def parse_utc_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def search_products(
     product_key: str, token: str, start_utc: datetime, end_utc: datetime
 ) -> list[dict]:
@@ -191,6 +213,91 @@ def search_products(
         return []
 
 
+def load_local_catalogue() -> list[dict]:
+    if not LOCAL_METADATA_PATH.exists():
+        return []
+
+    try:
+        with LOCAL_METADATA_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        logger.warning(f"Failed to load local Sentinel-5P metadata cache: {exc}")
+        return []
+
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        value = payload.get("value")
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def select_local_product(product_key: str, start_utc: datetime, end_utc: datetime) -> dict | None:
+    type_filter = PRODUCTS_DEF[product_key]["type_filter"]
+    records = [
+        record
+        for record in load_local_catalogue()
+        if record.get("product_type") == type_filter
+    ]
+
+    if not records:
+        return None
+
+    in_window = []
+    for record in records:
+        record_start = parse_utc_datetime(record.get("start_time_utc"))
+        if record_start and start_utc <= record_start <= end_utc:
+            in_window.append(record)
+
+    candidates = in_window or records
+    candidates.sort(
+        key=lambda record: parse_utc_datetime(record.get("start_time_utc"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def build_event_payload(
+    *,
+    product_key: str,
+    item: dict,
+    source: str,
+    ingest_time: str,
+    window_start: str,
+    window_end: str,
+    window_now: str,
+) -> dict:
+    product_meta = PRODUCTS_DEF[product_key]
+    content_start = (item.get("ContentDate") or {}).get("Start") or item.get("start_time_utc")
+    content_end = (item.get("ContentDate") or {}).get("End") or item.get("end_time_utc")
+    product_name = item.get("Name") or item.get("name") or "unknown"
+    product_id = item.get("Id") or item.get("id") or product_name
+
+    event_id = f"s5p_{product_key}_{product_id}_{window_start}_{window_end}".replace(
+        " ", ""
+    )
+
+    return {
+        "product": product_key,
+        "collection": product_meta["collection"],
+        "content_start": content_start,
+        "content_end": content_end,
+        "bbox": BBOX,
+        "product_name": product_name,
+        "product_id": product_id,
+        "unit": product_meta["unit"],
+        "ingest_time": ingest_time,
+        "window_mode": WINDOW_CONFIG.mode,
+        "window_start_utc": window_start,
+        "window_end_utc": window_end,
+        "window_now_utc": window_now,
+        "event_id": event_id,
+        "source": source,
+    }
+
+
 def run_once(producer) -> int:
     """
     Execute one ingest cycle: resolve window, search for each product,
@@ -204,15 +311,14 @@ def run_once(producer) -> int:
         f"(mode={WINDOW_CONFIG.mode})"
     )
 
-    if not CDSE_USERNAME or not CDSE_PASSWORD:
-        logger.error("Missing CDSE_USERNAME / CDSE_PASSWORD env vars")
-        return 0
-
-    try:
-        token = get_access_token(CDSE_USERNAME, CDSE_PASSWORD)
-    except Exception as e:
-        logger.error(f"Failed to get access token: {e}")
-        return 0
+    token: str | None = None
+    if CDSE_USERNAME and CDSE_PASSWORD:
+        try:
+            token = get_access_token(CDSE_USERNAME, CDSE_PASSWORD)
+        except Exception as e:
+            logger.warning(f"Failed to get access token, using local fallback if available: {e}")
+    else:
+        logger.warning("Missing CDSE_USERNAME / CDSE_PASSWORD env vars, using local fallback if available")
 
     sent = 0
     window_start = to_utc_iso(window.start_utc)
@@ -225,7 +331,17 @@ def run_once(producer) -> int:
             continue
 
         logger.info(f"[{idx}/{len(PRODUCTS)}] Searching {product_key}...")
-        items = search_products(product_key, token, window.start_utc, window.end_utc)
+        items = search_products(product_key, token, window.start_utc, window.end_utc) if token else []
+        source = "cdse"
+
+        if not items:
+            local_item = select_local_product(product_key, window.start_utc, window.end_utc)
+            if local_item is not None:
+                items = [local_item]
+                source = "local-cache"
+                logger.info(
+                    f"  Using local Sentinel-5P metadata cache: {LOCAL_METADATA_PATH}"
+                )
 
         if not items:
             logger.info(f"  No products found for {product_key}")
@@ -233,32 +349,15 @@ def run_once(producer) -> int:
 
         # Take only the first (most recent) product
         item = items[0]
-        product_name = item.get("Name", "unknown")
-        product_id = item.get("Id", "unknown")
-        content_start = (item.get("ContentDate") or {}).get("Start")
-        content_end = (item.get("ContentDate") or {}).get("End")
-
-        event_id = f"s5p_{product_key}_{product_id}_{window_start}_{window_end}".replace(
-            " ", ""
+        event = build_event_payload(
+            product_key=product_key,
+            item=item,
+            source=source,
+            ingest_time=ingest_time,
+            window_start=window_start,
+            window_end=window_end,
+            window_now=window_now,
         )
-
-        event = {
-            "product": product_key,
-            "collection": PRODUCTS_DEF[product_key]["collection"],
-            "content_start": content_start,
-            "content_end": content_end,
-            "bbox": BBOX,
-            "product_name": product_name,
-            "product_id": product_id,
-            "unit": PRODUCTS_DEF[product_key]["unit"],
-            "ingest_time": ingest_time,
-            "window_mode": WINDOW_CONFIG.mode,
-            "window_start_utc": window_start,
-            "window_end_utc": window_end,
-            "window_now_utc": window_now,
-            "event_id": event_id,
-            "source": "cdse",
-        }
 
         if send_event(
             producer=producer,
@@ -269,7 +368,7 @@ def run_once(producer) -> int:
             wait_for_ack=False,
         ):
             sent += 1
-            logger.info(f"  ✓ Sent {product_key}: {product_name}")
+            logger.info(f"  ✓ Sent {product_key}: {event['product_name']} ({source})")
         else:
             logger.warning(f"  ✗ Failed to send {product_key}")
 
