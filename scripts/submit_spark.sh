@@ -22,6 +22,11 @@ DETACH="${DETACH:-false}"
 STOP_AFTER_BATCH="${STOP_AFTER_BATCH:-false}"
 PROCESSING_TIME="${PROCESSING_TIME:-}"
 KAFKA_STARTING_OFFSETS="${KAFKA_STARTING_OFFSETS:-latest}"
+START_DATE="${START_DATE:-}"
+END_DATE="${END_DATE:-}"
+FULL_REFRESH="${FULL_REFRESH:-0}"
+MAIAC_LOCAL_FALLBACK_PATH="${MAIAC_LOCAL_FALLBACK_PATH:-/opt/maiac_data}"
+MAIAC_RELAXED_QA="${MAIAC_RELAXED_QA:-0}"
 SPARK_JARS_IVY="${SPARK_JARS_IVY:-/root/.ivy2}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-atmospheric_intelligence_sys---ais}"
 
@@ -184,6 +189,26 @@ case "$JOB_TYPE" in
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/maiac_summary/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
+  hanoi-weather-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="HanoiWeatherSurfaceProxySilver"
+    JOB_FILE="/opt/spark-jobs/hanoi_weather_surface_proxy_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/weather/weather_hanoi_surface_proxy_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hanoi_weather_surface_proxy_silver"
+    ICEBERG_TABLE="ais.weather.weather_hanoi_surface_proxy_silver"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  maiac-hanoi-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="MAIACHanoiSilver"
+    JOB_FILE="/opt/spark-jobs/maiac_hanoi_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH" "--local-fallback-path" "$MAIAC_LOCAL_FALLBACK_PATH" "--relaxed-qa" "$MAIAC_RELAXED_QA")
+    HDFS_DATA_DIR="/warehouse/iceberg/satellite/maiac_hanoi_daily_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/maiac_hanoi_daily_silver"
+    ICEBERG_TABLE="ais.satellite.maiac_hanoi_daily_silver"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
   cassandra-weather)
     JOB_TYPE_KIND="spark"
     APP_NAME="IcebergToCassandra_Weather"
@@ -230,7 +255,19 @@ case "$JOB_TYPE" in
     ;;
   *)
     echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|hanoi-weather-silver|maiac-hanoi-silver|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
+    ;;
+esac
+
+case "$JOB_TYPE" in
+  hanoi-weather-silver|maiac-hanoi-silver)
+    if [ -n "$START_DATE" ]; then
+      JOB_ARGS+=("--start-date" "$START_DATE")
+    fi
+    if [ -n "$END_DATE" ]; then
+      JOB_ARGS+=("--end-date" "$END_DATE")
+    fi
     ;;
 esac
 

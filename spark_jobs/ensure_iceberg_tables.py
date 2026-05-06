@@ -379,6 +379,11 @@ def ensure_tables(spark: SparkSession) -> None:
             valid_pct DOUBLE,
             tile_count INT,
             source_files STRING,
+            valid_pixel_count INT,
+            total_pixel_count INT,
+            valid_pct DOUBLE,
+            tile_count INT,
+            source_files ARRAY<STRING>,
             year INT,
             month INT,
             day INT,
@@ -442,6 +447,7 @@ def main() -> None:
     print(
         "Ensured Iceberg namespaces and tables for weather/air_quality/satellite + Hanoi silver/gold placeholders"
     )
+    print("Ensured Iceberg namespaces and tables for weather, openaq, sentinel5p, maiac, hanoi silver")
     spark.stop()
 
 
