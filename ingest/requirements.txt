@@ -4,4 +4,9 @@ requests==2.31.0
 numpy==1.26.4
 netCDF4==1.6.5
 python-dotenv==1.0.1
-python-dotenv
+
+# Config
+pyyaml==6.0.1
+
+# ERA5 CDS
+cdsapi==0.7.6

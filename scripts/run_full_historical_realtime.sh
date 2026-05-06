@@ -23,6 +23,12 @@ BOOTSTRAP_STARTING_OFFSETS="${BOOTSTRAP_STARTING_OFFSETS:-earliest}"
 ENABLE_AIRFLOW="${ENABLE_AIRFLOW:-false}"
 ENABLE_MONITORING="${ENABLE_MONITORING:-false}"
 
+# ERA5 (optional in this bootstrap)
+ENABLE_ERA5="${ENABLE_ERA5:-false}"
+ERA5_DATASET_TYPE="${ERA5_DATASET_TYPE:-surface}"
+ERA5_START_DATE="${ERA5_START_DATE:-}"
+ERA5_END_DATE="${ERA5_END_DATE:-}"
+
 unset STOP_AFTER_BATCH || true
 
 spark_app_registered() {
@@ -334,6 +340,36 @@ bash "$SCRIPT_DIR/create_topics.sh"
 
 echo "=== [4/9] Ensure Iceberg catalog/tables ==="
 bash scripts/submit_spark.sh ensure-iceberg
+
+if [ "$ENABLE_ERA5" = "true" ]; then
+  echo "=== [5/9] Historical backfill: ERA5 metadata (download + Kafka + Iceberg) ==="
+
+  if [ -z "$ERA5_START_DATE" ] || [ -z "$ERA5_END_DATE" ]; then
+    echo "[ERROR] ENABLE_ERA5=true but ERA5_START_DATE/ERA5_END_DATE are empty"
+    exit 1
+  fi
+
+  # Start metadata consumer (writes to Iceberg bronze)
+  ensure_exclusive_stream_resources "ERA5Files_Streaming"
+  ensure_spark_app_active "ERA5Files_Streaming" "era5-files" "$BOOTSTRAP_STARTING_OFFSETS"
+
+  # Run ingest (downloads NetCDF -> HDFS raw + sends Kafka events)
+  ERA5_START_DATE="$ERA5_START_DATE" \
+  ERA5_END_DATE="$ERA5_END_DATE" \
+  ERA5_DATASET_TYPE="$ERA5_DATASET_TYPE" \
+    bash scripts/submit_spark.sh era5-ingest
+
+  # One-shot metadata sink flush
+  STOP_AFTER_BATCH=true \
+  KAFKA_STARTING_OFFSETS=earliest \
+    bash scripts/submit_spark.sh era5-files
+
+  kill_spark_app_by_name "ERA5Files_Streaming"
+
+  echo "[OK] ERA5 metadata backfill done"
+else
+  echo "=== [5/9] Skip ERA5 (ENABLE_ERA5=${ENABLE_ERA5}) ==="
+fi
 
 echo "=== [5/9] Prepare Spark streaming consumers (on-demand per source) ==="
 
