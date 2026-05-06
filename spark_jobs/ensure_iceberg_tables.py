@@ -28,6 +28,9 @@ def ensure_tables(spark: SparkSession) -> None:
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.features")
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.models")
 
+    # ---------------------------------------------------------------------
+    # BRONZE
+    # ---------------------------------------------------------------------
     spark.sql(
         f"""
         CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.weather_history_bronze (
@@ -204,6 +207,83 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
+    # New bronze table: ERA5 raw file metadata
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.era5_files_bronze (
+            event_id STRING,
+            dataset_type STRING,
+            year INT,
+            month INT,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
+            bbox ARRAY<DOUBLE>,
+            file_path STRING,
+            file_size BIGINT,
+            checksum STRING,
+            source STRING,
+            ingest_time TIMESTAMP,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (dataset_type, year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    # ---------------------------------------------------------------------
+    # SILVER (schemas are minimal placeholders; will be refined in later TODOs)
+    # ---------------------------------------------------------------------
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality.openaq_hanoi_station_hourly_silver (
+            hour TIMESTAMP,
+            location_id BIGINT,
+            location_name STRING,
+            city STRING,
+            latitude DOUBLE,
+            longitude DOUBLE,
+            provider STRING,
+            sensor_id BIGINT,
+            parameter STRING,
+            unit STRING,
+            pm25 DOUBLE,
+            coverage_pct DOUBLE,
+            source STRING,
+            ingest_time TIMESTAMP,
+            spark_processed_at TIMESTAMP,
+            year INT,
+            month INT,
+            day INT
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality.openaq_hanoi_hourly_silver (
+            hour TIMESTAMP,
+            pm25_median DOUBLE,
+            pm25_mean DOUBLE,
+            pm25_min DOUBLE,
+            pm25_max DOUBLE,
+            pm25_std DOUBLE,
+            station_count INT,
+            coverage_avg DOUBLE,
+            year INT,
+            month INT,
+            day INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
     spark.sql(
         f"""
         CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.weather_hanoi_surface_proxy_silver (
@@ -232,6 +312,60 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.era5_surface_hanoi_hourly_silver (
+            hour TIMESTAMP,
+            wind_u10 DOUBLE,
+            wind_v10 DOUBLE,
+            wind_speed DOUBLE,
+            wind_dir DOUBLE,
+            pbl_height_m DOUBLE,
+            low_pbl BOOLEAN,
+            surface_pressure DOUBLE,
+            temperature_2m_c DOUBLE,
+            dewpoint_2m_c DOUBLE,
+            total_precipitation_mm DOUBLE,
+            mean_sea_level_pressure DOUBLE,
+            grid_point_count INT,
+            source_file STRING,
+            year INT,
+            month INT,
+            day INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.sentinel5p_hanoi_daily_silver (
+            product STRING,
+            date DATE,
+            overpass_time_utc TIMESTAMP,
+            value_mean DOUBLE,
+            value_min DOUBLE,
+            value_max DOUBLE,
+            value_std DOUBLE,
+            valid_pixel_count BIGINT,
+            total_pixel_count BIGINT,
+            valid_pct DOUBLE,
+            unit STRING,
+            source_file STRING,
+            year INT,
+            month INT,
+            day INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (product, year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
         CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.maiac_hanoi_daily_silver (
             date DATE,
             aod_047_mean DOUBLE,
@@ -240,6 +374,11 @@ def ensure_tables(spark: SparkSession) -> None:
             aod_min DOUBLE,
             aod_max DOUBLE,
             aod_std DOUBLE,
+            valid_pixel_count BIGINT,
+            total_pixel_count BIGINT,
+            valid_pct DOUBLE,
+            tile_count INT,
+            source_files STRING,
             valid_pixel_count INT,
             total_pixel_count INT,
             valid_pct DOUBLE,
@@ -256,11 +395,58 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
+    # ---------------------------------------------------------------------
+    # GOLD (schemas are minimal placeholders; will be refined in later TODOs)
+    # ---------------------------------------------------------------------
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.features.hanoi_pm25_master_hourly_gold (
+            hour TIMESTAMP,
+            pm25_median DOUBLE,
+            pm25_mean DOUBLE,
+            station_count INT,
+            coverage_avg DOUBLE,
+            year INT,
+            month_partition INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month_partition)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.features.hanoi_pm25_training_dataset_gold (
+            dataset_version STRING,
+            feature_set_name STRING,
+            split STRING,
+            created_at TIMESTAMP,
+            hour TIMESTAMP,
+            pm25_next_6h DOUBLE,
+            pm25_next_12h DOUBLE,
+            pm25_next_24h DOUBLE,
+            spark_processed_at TIMESTAMP,
+            year INT,
+            month_partition INT
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month_partition)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    # NOTE: Per request, do NOT create {ICEBERG_CATALOG}.models.hanoi_pm25_model_runs_gold yet.
+
 
 def main() -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
     ensure_tables(spark)
+    print(
+        "Ensured Iceberg namespaces and tables for weather/air_quality/satellite + Hanoi silver/gold placeholders"
+    )
     print("Ensured Iceberg namespaces and tables for weather, openaq, sentinel5p, maiac, hanoi silver")
     spark.stop()
 

@@ -27,6 +27,7 @@ from pyspark.sql.types import (
     StructType,
 )
 
+from hanoi_config import get_table_names
 from runtime_utils import apply_stream_trigger, parse_streaming_runtime
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -35,7 +36,9 @@ KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "latest")
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "hdfs://namenode:9000/checkpoints/weather_history/")
 ICEBERG_CATALOG = os.getenv("ICEBERG_CATALOG", "ais")
 ICEBERG_WAREHOUSE = os.getenv("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg")
-ICEBERG_TABLE = os.getenv("ICEBERG_TABLE", f"{ICEBERG_CATALOG}.weather.weather_history_bronze")
+
+TABLE_NAMES = get_table_names()
+ICEBERG_TABLE = os.getenv("ICEBERG_TABLE", TABLE_NAMES["weather_bronze"])
 
 WEATHER_SCHEMA = StructType(
     [

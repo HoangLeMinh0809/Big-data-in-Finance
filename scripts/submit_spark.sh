@@ -9,6 +9,8 @@
 #
 # Example:
 #   KAFKA_STARTING_OFFSETS=earliest bash scripts/submit_spark.sh sentinel5p
+#   bash scripts/submit_spark.sh era5-ingest   # download ERA5 + publish metadata to Kafka
+#   bash scripts/submit_spark.sh era5-files    # Spark consumer: Kafka era5-files -> Iceberg
 # =============================================================================
 
 set -euo pipefail
@@ -125,6 +127,13 @@ case "$JOB_TYPE" in
     INGEST_SCRIPT="maiac_ingest.py"
     INGEST_LOOKBACK_DAYS="${MAIAC_BATCH_LOOKBACK_DAYS:-${LOOKBACK_DAYS:-30}}"
     ;;
+  era5-ingest)
+    JOB_TYPE_KIND="ingest"
+    APP_NAME="ERA5Files_Ingest"
+    INGEST_SERVICE="ingest"
+    INGEST_SCRIPT="era5_ingest.py"
+    INGEST_LOOKBACK_DAYS="${ERA5_BATCH_LOOKBACK_DAYS:-${LOOKBACK_DAYS:-7}}"
+    ;;
   weather)
     JOB_TYPE_KIND="spark"
     APP_NAME="WeatherHistory_Streaming"
@@ -134,6 +143,17 @@ case "$JOB_TYPE" in
     KAFKA_TOPIC="weather_history"
     ICEBERG_TABLE="ais.weather.weather_history_bronze"
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/weather_history/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  era5-files)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="ERA5Files_Streaming"
+    JOB_FILE="/opt/spark-jobs/era5_files_streaming.py"
+    HDFS_DATA_DIR="/warehouse/iceberg/weather/era5_files_bronze"
+    HDFS_CHECKPOINT_DIR="/checkpoints/era5_files"
+    KAFKA_TOPIC="era5-files"
+    ICEBERG_TABLE="ais.weather.era5_files_bronze"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/era5_files/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   openaq)
@@ -234,6 +254,7 @@ case "$JOB_TYPE" in
     PACKAGES="${CASSANDRA_PACKAGES}"
     ;;
   *)
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     echo "Usage: $0 [weather|openaq|sentinel5p|maiac|hanoi-weather-silver|maiac-hanoi-silver|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
     ;;
@@ -254,15 +275,23 @@ if [ "${JOB_TYPE_KIND:-spark}" = "ingest" ]; then
   echo "=== Submit Ingest Job: $APP_NAME ==="
   docker compose -p "$COMPOSE_PROJECT_NAME" run --rm --no-deps \
     -e WINDOW_MODE=batch \
-    -e BATCH_LOOKBACK_DAYS="$INGEST_LOOKBACK_DAYS" \
+    -e LOOKBACK_DAYS="$INGEST_LOOKBACK_DAYS" \
+    -e KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}" \
+    -e KAFKA_TOPIC="${KAFKA_TOPIC:-}" \
     -e KAFKA_CONNECT_MAX_RETRIES=36 \
     -e KAFKA_CONNECT_RETRY_DELAY=5 \
-    "$INGEST_SERVICE" python -u "$INGEST_SCRIPT"
+    -e ERA5_START_DATE="${ERA5_START_DATE:-}" \
+    -e ERA5_END_DATE="${ERA5_END_DATE:-}" \
+    -e ERA5_DATASET_TYPE="${ERA5_DATASET_TYPE:-surface}" \
+    -e ERA5_OUTPUT_BASE_PATH="${ERA5_OUTPUT_BASE_PATH:-}" \
+    -e ERA5_SKIP_EXISTING="${ERA5_SKIP_EXISTING:-true}" \
+    "$INGEST_SERVICE" \
+    python3 "$INGEST_SCRIPT"
   exit 0
 fi
 
 case "$JOB_TYPE" in
-  weather|openaq|sentinel5p|maiac)
+  weather|openaq|sentinel5p|maiac|era5-files)
     # Keep each streaming app lightweight so multiple consumers can run on a small local cluster.
     SPARK_CORES_MAX="${SPARK_CORES_MAX:-1}"
     SPARK_EXECUTOR_CORES="${SPARK_EXECUTOR_CORES:-1}"
@@ -320,18 +349,12 @@ docker exec "${DOCKER_EXEC_ARGS[@]}" spark-master /opt/spark/bin/spark-submit \
   --conf "spark.jars.ivy=${SPARK_JARS_IVY}" \
   --repositories "https://repo.maven.apache.org/maven2,https://repo1.maven.org/maven2,https://repos.spark-packages.org" \
   --packages "$PACKAGES" \
+  --conf "spark.sql.streaming.checkpointLocation=${CHECKPOINT_PATH}" \
   --conf "spark.hadoop.fs.defaultFS=hdfs://namenode:9000" \
-  --conf "spark.sql.adaptive.enabled=true" \
-  --conf "spark.driver.memory=1g" \
-  --conf "spark.executor.memory=1g" \
-  --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
-  --conf "spark.sql.catalog.ais=org.apache.iceberg.spark.SparkCatalog" \
-  --conf "spark.sql.catalog.ais.type=hadoop" \
-  --conf "spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg" \
-  --conf "spark.cassandra.connection.host=cassandra" \
-  --conf "spark.cassandra.connection.port=9042" \
-  "${SPARK_EXTRA_CONF[@]}" \
-  "$JOB_FILE" "${JOB_ARGS[@]}" "${STREAM_ARGS[@]}"
+  --conf "spark.yarn.maxAppAttempts=1" \
+  "$JOB_FILE" \
+  "${JOB_ARGS[@]}" \
+  "${STREAM_ARGS[@]}"
 
 if [ "$DETACH" = "true" ]; then
   echo "Submitted in detached mode: $APP_NAME"
