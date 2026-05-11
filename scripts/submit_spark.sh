@@ -117,6 +117,7 @@ case "$JOB_TYPE" in
     INGEST_SCRIPT="ingest_weather.py"
     KAFKA_TOPIC="weather_history"
     INGEST_LOOKBACK_DAYS="${WEATHER_BATCH_LOOKBACK_DAYS:-7}"
+    KAFKA_TOPIC="weather_history"
     ;;
   openaq-ingest)
     JOB_TYPE_KIND="ingest"
@@ -125,6 +126,7 @@ case "$JOB_TYPE" in
     INGEST_SCRIPT="openaq_ingest.py"
     KAFKA_TOPIC="openaq-hourly"
     INGEST_LOOKBACK_DAYS="${OPENAQ_BATCH_LOOKBACK_DAYS:-7}"
+    KAFKA_TOPIC="openaq-hourly"
     ;;
   sentinel5p-ingest)
     JOB_TYPE_KIND="ingest"
@@ -133,6 +135,8 @@ case "$JOB_TYPE" in
     INGEST_SCRIPT="sentinel5p_ingest.py"
     KAFKA_TOPIC="sentinel5p-summary"
     INGEST_LOOKBACK_DAYS="${LOOKBACK_DAYS:-7}"
+    KAFKA_TOPIC="sentinel5p-summary"
+    SENTINEL5P_LOCAL_METADATA_PATH="/app/data/crawling/outputs/sentinel5p_vietnam_last_3d.json"
     ;;
   maiac-ingest)
     JOB_TYPE_KIND="ingest"
@@ -141,6 +145,7 @@ case "$JOB_TYPE" in
     INGEST_SCRIPT="maiac_ingest.py"
     KAFKA_TOPIC="maiac-summary"
     INGEST_LOOKBACK_DAYS="${MAIAC_BATCH_LOOKBACK_DAYS:-${LOOKBACK_DAYS:-30}}"
+    KAFKA_TOPIC="maiac-summary"
     ;;
   era5-ingest)
     JOB_TYPE_KIND="ingest"
@@ -149,6 +154,7 @@ case "$JOB_TYPE" in
     INGEST_SCRIPT="era5_ingest.py"
     KAFKA_TOPIC="era5-files"
     INGEST_LOOKBACK_DAYS="${ERA5_BATCH_LOOKBACK_DAYS:-${LOOKBACK_DAYS:-7}}"
+    KAFKA_TOPIC="era5-files"
     ;;
   weather)
     JOB_TYPE_KIND="spark"
@@ -366,7 +372,7 @@ if [ "${JOB_TYPE_KIND:-spark}" = "ingest" ]; then
     -e WINDOW_START_UTC="${WINDOW_START_UTC:-}" \
     -e WINDOW_END_UTC="${WINDOW_END_UTC:-}" \
     -e KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}" \
-    -e KAFKA_TOPIC="${KAFKA_TOPIC:-}" \
+    -e KAFKA_TOPIC="$KAFKA_TOPIC" \
     -e KAFKA_CONNECT_MAX_RETRIES=36 \
     -e KAFKA_CONNECT_RETRY_DELAY=5 \
     -e CDS_URL="${CDS_URL:-}" \
@@ -376,6 +382,7 @@ if [ "${JOB_TYPE_KIND:-spark}" = "ingest" ]; then
     -e ERA5_DATASET_TYPE="${ERA5_DATASET_TYPE:-surface}" \
     -e ERA5_OUTPUT_BASE_PATH="${ERA5_OUTPUT_BASE_PATH:-}" \
     -e ERA5_SKIP_EXISTING="${ERA5_SKIP_EXISTING:-true}" \
+    -e SENTINEL5P_LOCAL_METADATA_PATH="${SENTINEL5P_LOCAL_METADATA_PATH:-}" \
     "$INGEST_SERVICE" \
     python3 "$INGEST_SCRIPT"
   exit 0

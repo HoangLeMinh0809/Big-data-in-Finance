@@ -383,6 +383,7 @@ services:
       S5P_MAX_DOWNLOAD_BYTES: ${S5P_MAX_DOWNLOAD_BYTES:-0}
     volumes:
       - ./checkpoints:/opt/checkpoints
+      - ./data/crawling/outputs:/app/data/crawling/outputs:ro
     command: ["python", "-u", "sentinel5p_ingest.py"]
     networks:
       - bigdata-net
