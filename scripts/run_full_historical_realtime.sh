@@ -281,6 +281,7 @@ wait_for_healthy() {
 
     if [ "$elapsed" -ge "$timeout_sec" ]; then
       echo "[ERROR] Timeout waiting for $container_name (last status=$status)"
+      print_container_diagnostics "$container_name"
       return 1
     fi
 
@@ -288,6 +289,16 @@ wait_for_healthy() {
     sleep 5
     elapsed=$((elapsed + 5))
   done
+}
+
+print_container_diagnostics() {
+  local container_name="$1"
+
+  echo "[DEBUG] ${container_name} health log:"
+  docker inspect -f '{{range .State.Health.Log}}{{println .ExitCode ":" .Output}}{{end}}' "$container_name" 2>/dev/null || true
+
+  echo "[DEBUG] ${container_name} container logs (tail):"
+  docker logs --tail 120 "$container_name" 2>&1 || true
 }
 
 wait_for_hdfs_parquet() {
@@ -328,11 +339,13 @@ if [ "$RESET_STREAM_CHECKPOINTS" = "true" ]; then
   kill_spark_app_by_name "OpenAQHourly_Streaming"
   kill_spark_app_by_name "Sentinel5PSummary_Streaming"
   kill_spark_app_by_name "MAIACSummary_Streaming"
+  kill_spark_app_by_name "ERA5Files_Streaming"
 
   docker exec namenode hdfs dfs -rm -r -f /checkpoints/weather_history || true
   docker exec namenode hdfs dfs -rm -r -f /checkpoints/openaq_hourly || true
   docker exec namenode hdfs dfs -rm -r -f /checkpoints/sentinel5p_summary || true
   docker exec namenode hdfs dfs -rm -r -f /checkpoints/maiac_summary || true
+  docker exec namenode hdfs dfs -rm -r -f /checkpoints/era5_files || true
 fi
 
 echo "=== [3/9] Create Kafka topics ==="

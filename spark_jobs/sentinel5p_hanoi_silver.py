@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, coalesce, to_date, to_timestamp, upper
+from pyspark.sql.functions import col, coalesce, lit, to_date, to_timestamp, upper
 from pyspark.sql.types import DateType, DoubleType, IntegerType, LongType, StringType, StructField, StructType, TimestampType
 
 try:
@@ -45,7 +46,14 @@ except Exception as exc:  # pragma: no cover - handled at runtime with a clear m
 else:
     NETCDF_IMPORT_ERROR = None
 
-from hanoi_config import TABLES, get_hanoi_bbox, get_sentinel5p_products, get_sentinel5p_raw_base_path
+from hanoi_config import (
+    ICEBERG_CATALOG,
+    ICEBERG_WAREHOUSE,
+    TABLES,
+    get_hanoi_bbox,
+    get_sentinel5p_products,
+    get_sentinel5p_raw_base_path,
+)
 
 
 PRODUCTS = {
@@ -82,6 +90,25 @@ LOCAL_SEARCH_ROOTS = [
     Path("sentinel5p_data"),
 ]
 
+
+def _get_qa_threshold(product: str) -> float:
+    default_threshold = float(PRODUCTS[product]["qa_threshold"])
+    override_names = [
+        f"S5P_{product}_QA_THRESHOLD",
+        "S5P_QA_THRESHOLD",
+    ]
+    for name in override_names:
+        raw_value = os.getenv(name)
+        if raw_value is None or not raw_value.strip():
+            continue
+        try:
+            threshold = float(raw_value)
+        except ValueError:
+            print(f"[WARN] Invalid {name}={raw_value!r}; using default {default_threshold}")
+            return default_threshold
+        return max(0.0, min(1.0, threshold))
+    return default_threshold
+
 OUTPUT_SCHEMA = StructType(
     [
         StructField("product", StringType(), False),
@@ -108,12 +135,41 @@ def create_spark_session() -> SparkSession:
     return (
         SparkSession.builder
         .appName("hanoi-sentinel5p-silver")
-        .config("spark.sql.catalog.ais", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.ais.type", "hadoop")
-        .config("spark.sql.catalog.ais.warehouse", "hdfs://namenode:9000/warehouse/iceberg")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.type", "hadoop")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse", ICEBERG_WAREHOUSE)
         .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000")
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
         .getOrCreate()
+    )
+
+
+def ensure_table(spark: SparkSession, table_name: str) -> None:
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.satellite")
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            product STRING,
+            date DATE,
+            overpass_time_utc TIMESTAMP,
+            value_mean DOUBLE,
+            value_min DOUBLE,
+            value_max DOUBLE,
+            value_std DOUBLE,
+            valid_pixel_count BIGINT,
+            total_pixel_count BIGINT,
+            valid_pct DOUBLE,
+            unit STRING,
+            source_file STRING,
+            year INT,
+            month INT,
+            day INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (product, year, month, day)
+        TBLPROPERTIES ('format-version'='2')
+        """
     )
 
 
@@ -235,6 +291,11 @@ def _list_hdfs_files(root_path: str) -> dict[str, str]:
 
 
 def _resolve_source_file(metadata: dict[str, Any], raw_base_path: str) -> tuple[str | None, str | None]:
+    raw_file_path = str(metadata.get("raw_file_path") or "").strip()
+    raw_downloaded = metadata.get("raw_downloaded")
+    if raw_file_path and raw_downloaded is not False:
+        return raw_file_path, raw_file_path
+
     candidates = _candidate_file_names(metadata)
     if not candidates:
         return None, None
@@ -305,7 +366,7 @@ def _read_granule_stats(local_path: Path, product: str, bbox: dict[str, float], 
 
     config = PRODUCTS[product]
     variable_name = config["variable"]
-    qa_threshold = config["qa_threshold"]
+    qa_threshold = _get_qa_threshold(product)
 
     with nc.Dataset(str(local_path)) as dataset:
         group = _find_product_group(dataset, variable_name)
@@ -339,13 +400,25 @@ def _read_granule_stats(local_path: Path, product: str, bbox: dict[str, float], 
                 "valid_pixel_count": 0,
                 "total_pixel_count": 0,
                 "overpass_time_utc": event_ts,
+                "qa_threshold": qa_threshold,
+                "qa_min": None,
+                "qa_max": None,
+                "qa_mean": None,
             }
 
         qa_mask = np.ones_like(values, dtype=bool)
+        qa_min = None
+        qa_max = None
+        qa_mean = None
         qa_variable = group.variables.get("qa_value")
         if qa_variable is not None:
             qa_values = np.asarray(qa_variable[0].data, dtype=float)
             qa_mask = np.isfinite(qa_values) & (qa_values >= qa_threshold)
+            bbox_qa_values = qa_values[base_mask & np.isfinite(qa_values)]
+            if bbox_qa_values.size > 0:
+                qa_min = float(np.nanmin(bbox_qa_values))
+                qa_max = float(np.nanmax(bbox_qa_values))
+                qa_mean = float(np.nanmean(bbox_qa_values))
 
         valid_mask = base_mask & qa_mask
         valid_values = values[valid_mask]
@@ -355,6 +428,10 @@ def _read_granule_stats(local_path: Path, product: str, bbox: dict[str, float], 
             "valid_pixel_count": int(valid_values.size),
             "total_pixel_count": total_pixel_count,
             "overpass_time_utc": event_ts,
+            "qa_threshold": qa_threshold,
+            "qa_min": qa_min,
+            "qa_max": qa_max,
+            "qa_mean": qa_mean,
         }
 
 
@@ -422,6 +499,17 @@ def build_daily_rows(spark: SparkSession, start_date: date, end_date: date) -> l
         ),
     ).withColumn("event_date", to_date(col("event_ts")))
 
+    optional_metadata_columns = [
+        "raw_file_path",
+        "raw_downloaded",
+        "download_url",
+        "raw_download_error",
+    ]
+    optional_select_exprs = [
+        col(column_name) if column_name in bronze_df.columns else lit(None).alias(column_name)
+        for column_name in optional_metadata_columns
+    ]
+
     filtered_rows = (
         bronze_df
         .filter(col("normalized_product").isin(sorted(allowed_products)))
@@ -436,6 +524,7 @@ def build_daily_rows(spark: SparkSession, start_date: date, end_date: date) -> l
             "ingest_time",
             "event_ts",
             "event_date",
+            *optional_select_exprs,
         )
         .collect()
     )
@@ -479,6 +568,16 @@ def build_daily_rows(spark: SparkSession, start_date: date, end_date: date) -> l
             if file_stats is None:
                 continue
 
+            print(
+                f"[INFO] Sentinel-5P pixels product={product} date={day_value} "
+                f"source={Path(provenance_path or resolved_path).name} "
+                f"total_pixels={file_stats['total_pixel_count']} "
+                f"valid_pixels={file_stats['valid_pixel_count']} "
+                f"qa_threshold={file_stats['qa_threshold']} "
+                f"qa_min={file_stats['qa_min']} "
+                f"qa_max={file_stats['qa_max']} "
+                f"qa_mean={file_stats['qa_mean']}"
+            )
             stats_payload.append(file_stats)
 
         row = _build_output_row(product, day_value, stats_payload, source_files, spark_processed_at)
@@ -497,8 +596,10 @@ def create_output_dataframe(spark: SparkSession, rows: list[dict[str, Any]]):
     return spark.createDataFrame([], schema=OUTPUT_SCHEMA)
 
 
-def write_to_iceberg(df, table_name: str) -> None:
+def write_to_iceberg(spark: SparkSession, df, table_name: str, full_refresh: bool) -> None:
     print(f"[INFO] Writing {df.count()} Sentinel-5P row(s) to {table_name}")
+    if full_refresh:
+        spark.sql(f"DELETE FROM {table_name}")
     df.writeTo(table_name).overwritePartitions()
 
 
@@ -543,11 +644,12 @@ def main() -> None:
 
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
+    ensure_table(spark, TABLES["sentinel5p_silver"])
 
     rows = build_daily_rows(spark, start_date, end_date)
     output_df = create_output_dataframe(spark, rows)
     validate_output(output_df)
-    write_to_iceberg(output_df, TABLES["sentinel5p_silver"])
+    write_to_iceberg(spark, output_df, TABLES["sentinel5p_silver"], full_refresh=bool(args.full_refresh))
 
     print(f"Successfully wrote Sentinel-5P daily silver to {TABLES['sentinel5p_silver']}")
     spark.stop()

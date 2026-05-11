@@ -12,6 +12,8 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import requests
 
@@ -109,6 +111,12 @@ PRODUCTS = [
 REQUEST_TIMEOUT_SEC = int(os.getenv("REQUEST_TIMEOUT_SEC", "30"))
 REQUEST_DELAY_SEC = float(os.getenv("REQUEST_DELAY_SEC", "0.2"))
 SEND_DELAY_MS = int(os.getenv("SEND_DELAY_MS", "0"))
+DOWNLOAD_RAW = parse_bool(os.getenv("S5P_DOWNLOAD_RAW", os.getenv("DOWNLOAD_RAW", "false")), default=False)
+RAW_HDFS_BASE_PATH = os.getenv("S5P_RAW_HDFS_BASE_PATH", "/raw/sentinel5p").strip().rstrip("/")
+HDFS_WEBHDFS_BASE = os.getenv("HDFS_WEBHDFS_BASE", "http://namenode:9870/webhdfs/v1").strip().rstrip("/")
+DOWNLOAD_TIMEOUT_SEC = int(os.getenv("DOWNLOAD_TIMEOUT_SEC", "600"))
+DOWNLOAD_CHUNK_SIZE = int(os.getenv("DOWNLOAD_CHUNK_SIZE", str(1024 * 1024)))
+MAX_DOWNLOAD_BYTES = int(os.getenv("S5P_MAX_DOWNLOAD_BYTES", "0"))
 
 WINDOW_CONFIG = build_default_window_config(
     mode=os.getenv("WINDOW_MODE", "batch"),
@@ -144,6 +152,151 @@ def get_access_token(username: str, password: str) -> str:
 def to_odata_datetime(dt: datetime) -> str:
     """Format datetime for ODATA filter (Copernicus API expects this format)."""
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _safe_int(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_content_date_day(content_start: str | None) -> tuple[int, int, int]:
+    if content_start:
+        try:
+            parsed = datetime.fromisoformat(content_start.replace("Z", "+00:00"))
+            parsed = parsed.astimezone(timezone.utc)
+            return parsed.year, parsed.month, parsed.day
+        except ValueError:
+            pass
+
+    now = datetime.now(timezone.utc)
+    return now.year, now.month, now.day
+
+
+def build_download_url(product_id: str) -> str:
+    return f"https://download.dataspace.copernicus.eu/odata/v1/Products({product_id})/$value"
+
+
+def _webhdfs_path(path: str) -> str:
+    return f"{HDFS_WEBHDFS_BASE}/{path.strip('/')}"
+
+
+def webhdfs_exists(path: str) -> bool:
+    response = requests.get(
+        _webhdfs_path(path),
+        params={"op": "GETFILESTATUS"},
+        timeout=REQUEST_TIMEOUT_SEC,
+    )
+    if response.status_code == 200:
+        return True
+    if response.status_code == 404:
+        return False
+    response.raise_for_status()
+    return False
+
+
+def webhdfs_mkdirs(path: str) -> None:
+    response = requests.put(
+        _webhdfs_path(path),
+        params={"op": "MKDIRS"},
+        timeout=REQUEST_TIMEOUT_SEC,
+    )
+    response.raise_for_status()
+
+
+def upload_file_to_hdfs(local_path: Path, hdfs_path: str) -> str:
+    parent = str(Path(hdfs_path).parent).replace("\\", "/")
+    webhdfs_mkdirs(parent)
+
+    create_response = requests.put(
+        _webhdfs_path(hdfs_path),
+        params={"op": "CREATE", "overwrite": "true"},
+        allow_redirects=False,
+        timeout=REQUEST_TIMEOUT_SEC,
+    )
+    if create_response.status_code not in {201, 307}:
+        create_response.raise_for_status()
+
+    upload_url = create_response.headers.get("Location")
+    if not upload_url:
+        return f"hdfs://namenode:9000/{hdfs_path.strip('/')}"
+
+    with local_path.open("rb") as handle:
+        response = requests.put(upload_url, data=handle, timeout=DOWNLOAD_TIMEOUT_SEC)
+    response.raise_for_status()
+    return f"hdfs://namenode:9000/{hdfs_path.strip('/')}"
+
+
+def download_product_to_file(download_url: str, token: str, local_path: Path, expected_size: int | None) -> None:
+    if MAX_DOWNLOAD_BYTES > 0 and expected_size and expected_size > MAX_DOWNLOAD_BYTES:
+        raise RuntimeError(
+            f"Product is larger than S5P_MAX_DOWNLOAD_BYTES: {expected_size} > {MAX_DOWNLOAD_BYTES}"
+        )
+
+    with requests.get(
+        download_url,
+        headers={"Authorization": f"Bearer {token}"},
+        stream=True,
+        timeout=DOWNLOAD_TIMEOUT_SEC,
+    ) as response:
+        response.raise_for_status()
+        with local_path.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    handle.write(chunk)
+
+
+def maybe_download_raw_product(product_key: str, item: dict, token: str, content_start: str | None) -> dict:
+    product_id = item.get("Id", "")
+    product_name = item.get("Name", "")
+    content_length = _safe_int(item.get("ContentLength"))
+    download_url = build_download_url(product_id) if product_id else ""
+
+    result = {
+        "file_name": product_name,
+        "download_url": download_url,
+        "content_length": content_length,
+        "s3_path": item.get("S3Path"),
+        "raw_file_path": None,
+        "raw_downloaded": False,
+        "raw_download_error": None,
+    }
+
+    if not DOWNLOAD_RAW:
+        return result
+    if not product_id or not product_name:
+        result["raw_download_error"] = "missing_product_id_or_name"
+        return result
+
+    year, month, day = _parse_content_date_day(content_start)
+    hdfs_path = (
+        f"{RAW_HDFS_BASE_PATH}/product={product_key}/year={year:04d}/month={month:02d}/day={day:02d}/"
+        f"{product_name}"
+    )
+    result["raw_file_path"] = f"hdfs://namenode:9000/{hdfs_path.strip('/')}"
+
+    try:
+        if webhdfs_exists(hdfs_path):
+            result["raw_downloaded"] = True
+            logger.info("Raw product already exists in HDFS: %s", result["raw_file_path"])
+            return result
+
+        with TemporaryDirectory(prefix="s5p_download_") as tmp_dir:
+            local_path = Path(tmp_dir) / product_name
+            logger.info("Downloading raw %s to temporary file (%s bytes)", product_name, content_length)
+            download_product_to_file(download_url, token, local_path, content_length)
+            result["raw_file_path"] = upload_file_to_hdfs(local_path, hdfs_path)
+            result["raw_downloaded"] = True
+            logger.info("Uploaded raw product to %s", result["raw_file_path"])
+    except Exception as exc:
+        result["raw_downloaded"] = False
+        result["raw_download_error"] = str(exc)[:500]
+        logger.error("Raw product download/upload failed for %s: %s", product_name, exc)
+
+    return result
 
 
 def search_products(
@@ -237,6 +390,7 @@ def run_once(producer) -> int:
         product_id = item.get("Id", "unknown")
         content_start = (item.get("ContentDate") or {}).get("Start")
         content_end = (item.get("ContentDate") or {}).get("End")
+        raw_payload = maybe_download_raw_product(product_key, item, token, content_start)
 
         event_id = f"s5p_{product_key}_{product_id}_{window_start}_{window_end}".replace(
             " ", ""
@@ -250,6 +404,13 @@ def run_once(producer) -> int:
             "bbox": BBOX,
             "product_name": product_name,
             "product_id": product_id,
+            "file_name": raw_payload["file_name"],
+            "download_url": raw_payload["download_url"],
+            "content_length": raw_payload["content_length"],
+            "s3_path": raw_payload["s3_path"],
+            "raw_file_path": raw_payload["raw_file_path"],
+            "raw_downloaded": raw_payload["raw_downloaded"],
+            "raw_download_error": raw_payload["raw_download_error"],
             "unit": PRODUCTS_DEF[product_key]["unit"],
             "ingest_time": ingest_time,
             "window_mode": WINDOW_CONFIG.mode,
@@ -307,6 +468,8 @@ def main():
     logger.info(f"BBOX:           {BBOX}")
     logger.info(f"Kafka topic:    {KAFKA_TOPIC}")
     logger.info(f"State file:     {WINDOW_CONFIG.state_file}")
+    logger.info(f"Download raw:   {DOWNLOAD_RAW}")
+    logger.info(f"Raw HDFS path:  {RAW_HDFS_BASE_PATH}")
 
     if WINDOW_CONFIG.mode == "realtime":
         logger.info(f"Realtime poll:  {WINDOW_CONFIG.poll_seconds}s")

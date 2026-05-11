@@ -17,6 +17,15 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
+# Load .env file to get credentials and configuration
+if [ -f ".env" ]; then
+  set +u  # Temporarily disable strict mode for variable substitution
+  set -a
+  source .env
+  set +a
+  set -u  # Re-enable strict mode
+fi
+
 JOB_TYPE="${1:-weather}"
 DETACH="${DETACH:-false}"
 STOP_AFTER_BATCH="${STOP_AFTER_BATCH:-false}"
@@ -24,6 +33,8 @@ PROCESSING_TIME="${PROCESSING_TIME:-}"
 KAFKA_STARTING_OFFSETS="${KAFKA_STARTING_OFFSETS:-latest}"
 START_DATE="${START_DATE:-}"
 END_DATE="${END_DATE:-}"
+ERA5_START_DATE="${ERA5_START_DATE:-}"
+ERA5_END_DATE="${ERA5_END_DATE:-}"
 FULL_REFRESH="${FULL_REFRESH:-0}"
 MAIAC_LOCAL_FALLBACK_PATH="${MAIAC_LOCAL_FALLBACK_PATH:-/opt/maiac_data}"
 MAIAC_RELAXED_QA="${MAIAC_RELAXED_QA:-0}"
@@ -104,6 +115,7 @@ case "$JOB_TYPE" in
     APP_NAME="WeatherHistory_Ingest"
     INGEST_SERVICE="ingest"
     INGEST_SCRIPT="ingest_weather.py"
+    KAFKA_TOPIC="weather_history"
     INGEST_LOOKBACK_DAYS="${WEATHER_BATCH_LOOKBACK_DAYS:-7}"
     ;;
   openaq-ingest)
@@ -111,6 +123,7 @@ case "$JOB_TYPE" in
     APP_NAME="OpenAQHourly_Ingest"
     INGEST_SERVICE="openaq-ingest"
     INGEST_SCRIPT="openaq_ingest.py"
+    KAFKA_TOPIC="openaq-hourly"
     INGEST_LOOKBACK_DAYS="${OPENAQ_BATCH_LOOKBACK_DAYS:-7}"
     ;;
   sentinel5p-ingest)
@@ -118,6 +131,7 @@ case "$JOB_TYPE" in
     APP_NAME="Sentinel5PSummary_Ingest"
     INGEST_SERVICE="sentinel5p-ingest"
     INGEST_SCRIPT="sentinel5p_ingest.py"
+    KAFKA_TOPIC="sentinel5p-summary"
     INGEST_LOOKBACK_DAYS="${LOOKBACK_DAYS:-7}"
     ;;
   maiac-ingest)
@@ -125,6 +139,7 @@ case "$JOB_TYPE" in
     APP_NAME="MAIACSummary_Ingest"
     INGEST_SERVICE="maiac-ingest"
     INGEST_SCRIPT="maiac_ingest.py"
+    KAFKA_TOPIC="maiac-summary"
     INGEST_LOOKBACK_DAYS="${MAIAC_BATCH_LOOKBACK_DAYS:-${LOOKBACK_DAYS:-30}}"
     ;;
   era5-ingest)
@@ -132,6 +147,7 @@ case "$JOB_TYPE" in
     APP_NAME="ERA5Files_Ingest"
     INGEST_SERVICE="ingest"
     INGEST_SCRIPT="era5_ingest.py"
+    KAFKA_TOPIC="era5-files"
     INGEST_LOOKBACK_DAYS="${ERA5_BATCH_LOOKBACK_DAYS:-${LOOKBACK_DAYS:-7}}"
     ;;
   weather)
@@ -189,6 +205,17 @@ case "$JOB_TYPE" in
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/maiac_summary/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
+  hanoi-openaq-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="HanoiOpenAQSilver"
+    JOB_FILE="/opt/spark-jobs/hanoi_openaq_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/air_quality/openaq_hanoi_hourly_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hanoi_openaq_silver"
+    ICEBERG_TABLE="ais.air_quality.openaq_hanoi_hourly_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hanoi_openaq_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
   hanoi-weather-silver)
     JOB_TYPE_KIND="spark"
     APP_NAME="HanoiWeatherSurfaceProxySilver"
@@ -197,6 +224,29 @@ case "$JOB_TYPE" in
     HDFS_DATA_DIR="/warehouse/iceberg/weather/weather_hanoi_surface_proxy_silver"
     HDFS_CHECKPOINT_DIR="/checkpoints/hanoi_weather_surface_proxy_silver"
     ICEBERG_TABLE="ais.weather.weather_hanoi_surface_proxy_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hanoi_weather_surface_proxy_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  era5-surface-hanoi-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="ERA5SurfaceHanoiSilver"
+    JOB_FILE="/opt/spark-jobs/era5_surface_hanoi_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/weather/era5_surface_hanoi_hourly_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/era5_surface_hanoi_silver"
+    ICEBERG_TABLE="ais.weather.era5_surface_hanoi_hourly_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/era5_surface_hanoi_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  sentinel5p-hanoi-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="Sentinel5PHanoiSilver"
+    JOB_FILE="/opt/spark-jobs/sentinel5p_hanoi_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/satellite/sentinel5p_hanoi_daily_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/sentinel5p_hanoi_silver"
+    ICEBERG_TABLE="ais.satellite.sentinel5p_hanoi_daily_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/sentinel5p_hanoi_silver/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   maiac-hanoi-silver)
@@ -207,6 +257,40 @@ case "$JOB_TYPE" in
     HDFS_DATA_DIR="/warehouse/iceberg/satellite/maiac_hanoi_daily_silver"
     HDFS_CHECKPOINT_DIR="/checkpoints/maiac_hanoi_daily_silver"
     ICEBERG_TABLE="ais.satellite.maiac_hanoi_daily_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/maiac_hanoi_daily_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  hanoi-master-features-gold)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="HanoiPM25MasterFeaturesGold"
+    JOB_FILE="/opt/spark-jobs/hanoi_pm25_master_features_gold.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/features/hanoi_pm25_master_hourly_gold"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hanoi_pm25_master_features_gold"
+    ICEBERG_TABLE="ais.features.hanoi_pm25_master_hourly_gold"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hanoi_pm25_master_features_gold/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  hanoi-training-dataset-gold)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="HanoiPM25TrainingDatasetGold"
+    JOB_FILE="/opt/spark-jobs/hanoi_pm25_training_dataset_gold.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/features/hanoi_pm25_training_dataset_gold"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hanoi_pm25_training_dataset_gold"
+    ICEBERG_TABLE="ais.features.hanoi_pm25_training_dataset_gold"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hanoi_pm25_training_dataset_gold/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  hanoi-train-baseline)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="TrainHanoiPM25Baseline"
+    JOB_FILE="/opt/ml/train_hanoi_pm25.py"
+    JOB_ARGS=("--dataset-version" "${DATASET_VERSION:-hanoi_pm25_v1}" "--feature-set-name" "${FEATURE_SET_NAME:-hanoi_pm25_core_v1}" "--model-type" "${MODEL_TYPE:-lightgbm}" "--output-dir" "${MODEL_OUTPUT_DIR:-/opt/models/hanoi_pm25}")
+    HDFS_DATA_DIR="/warehouse/iceberg/models/hanoi_pm25_model_runs_gold"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hanoi_train_baseline"
+    ICEBERG_TABLE="ais.models.hanoi_pm25_model_runs_gold"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hanoi_train_baseline/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   cassandra-weather)
@@ -233,6 +317,7 @@ case "$JOB_TYPE" in
     JOB_FILE="/opt/spark-jobs/ensure_iceberg_tables.py"
     HDFS_DATA_DIR="/warehouse/iceberg"
     HDFS_CHECKPOINT_DIR="/checkpoints"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/ensure_iceberg/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   maintenance-iceberg)
@@ -242,6 +327,7 @@ case "$JOB_TYPE" in
     JOB_ARGS=("--retention-hours" "${RETENTION_HOURS:-168}")
     HDFS_DATA_DIR="/warehouse/iceberg"
     HDFS_CHECKPOINT_DIR="/checkpoints"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/iceberg_maintenance/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   reconcile-serving)
@@ -251,17 +337,17 @@ case "$JOB_TYPE" in
     JOB_ARGS=("--lookback-hours" "${RECONCILE_LOOKBACK_HOURS:-24}" "--tolerance" "${RECONCILE_TOLERANCE:-0.95}")
     HDFS_DATA_DIR="/warehouse/iceberg"
     HDFS_CHECKPOINT_DIR="/checkpoints"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/reconcile_serving/"
     PACKAGES="${CASSANDRA_PACKAGES}"
     ;;
   *)
-    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
-    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|hanoi-weather-silver|maiac-hanoi-silver|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
     ;;
 esac
 
 case "$JOB_TYPE" in
-  hanoi-weather-silver|maiac-hanoi-silver)
+  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
     if [ -n "$START_DATE" ]; then
       JOB_ARGS+=("--start-date" "$START_DATE")
     fi
@@ -275,11 +361,16 @@ if [ "${JOB_TYPE_KIND:-spark}" = "ingest" ]; then
   echo "=== Submit Ingest Job: $APP_NAME ==="
   docker compose -p "$COMPOSE_PROJECT_NAME" run --rm --no-deps \
     -e WINDOW_MODE=batch \
+    -e BATCH_LOOKBACK_DAYS="$INGEST_LOOKBACK_DAYS" \
     -e LOOKBACK_DAYS="$INGEST_LOOKBACK_DAYS" \
+    -e WINDOW_START_UTC="${WINDOW_START_UTC:-}" \
+    -e WINDOW_END_UTC="${WINDOW_END_UTC:-}" \
     -e KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}" \
     -e KAFKA_TOPIC="${KAFKA_TOPIC:-}" \
     -e KAFKA_CONNECT_MAX_RETRIES=36 \
     -e KAFKA_CONNECT_RETRY_DELAY=5 \
+    -e CDS_URL="${CDS_URL:-}" \
+    -e CDS_KEY="${CDS_KEY:-}" \
     -e ERA5_START_DATE="${ERA5_START_DATE:-}" \
     -e ERA5_END_DATE="${ERA5_END_DATE:-}" \
     -e ERA5_DATASET_TYPE="${ERA5_DATASET_TYPE:-surface}" \
@@ -333,6 +424,12 @@ DOCKER_EXEC_ARGS+=("-e" "KAFKA_STARTING_OFFSETS=${KAFKA_STARTING_OFFSETS}")
 DOCKER_EXEC_ARGS+=("-e" "KAFKA_TOPIC=${KAFKA_TOPIC:-}")
 DOCKER_EXEC_ARGS+=("-e" "ICEBERG_TABLE=${ICEBERG_TABLE:-}")
 DOCKER_EXEC_ARGS+=("-e" "CHECKPOINT_PATH=${CHECKPOINT_PATH:-}")
+DOCKER_EXEC_ARGS+=("-e" "S5P_QA_THRESHOLD=${S5P_QA_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "S5P_NO2_QA_THRESHOLD=${S5P_NO2_QA_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "S5P_CO_QA_THRESHOLD=${S5P_CO_QA_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "S5P_SO2_QA_THRESHOLD=${S5P_SO2_QA_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "S5P_O3_QA_THRESHOLD=${S5P_O3_QA_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "S5P_AER_AI_QA_THRESHOLD=${S5P_AER_AI_QA_THRESHOLD:-}")
 
 SPARK_EXTRA_CONF=()
 if [ -n "$SPARK_CORES_MAX" ]; then

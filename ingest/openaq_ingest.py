@@ -26,6 +26,9 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "openaq-hourly")
 OPENAQ_API_KEY = os.getenv("OPENAQ_API_KEY", "").strip()
 OPENAQ_BASE_URL = os.getenv("OPENAQ_BASE_URL", "https://api.openaq.org/v3")
+OPENAQ_COUNTRY_CODE = os.getenv("OPENAQ_COUNTRY_CODE", "VN").strip().upper()
+OPENAQ_COUNTRY_ID = os.getenv("OPENAQ_COUNTRY_ID", "").strip()
+OPENAQ_BBOX = os.getenv("OPENAQ_BBOX", "").strip()
 MAX_LOCATIONS = int(os.getenv("MAX_LOCATIONS", "100"))
 REQUEST_DELAY_SEC = float(os.getenv("REQUEST_DELAY_SEC", "0.35"))
 SEND_DELAY_MS = int(os.getenv("SEND_DELAY_MS", "0"))
@@ -111,10 +114,49 @@ def fetch_all_pages(url: str, base_params: dict) -> list[dict]:
     return results
 
 
+def _country_matches(country: dict, country_code: str) -> bool:
+    expected = country_code.strip().upper()
+    candidates = {
+        str(country.get("code") or "").strip().upper(),
+        str(country.get("iso") or "").strip().upper(),
+        str(country.get("iso2") or "").strip().upper(),
+    }
+    if expected in candidates:
+        return True
+
+    name = str(country.get("name") or "").strip().lower()
+    return expected == "VN" and name in {"vietnam", "viet nam"}
+
+
+def resolve_country_id(country_code: str = OPENAQ_COUNTRY_CODE) -> int:
+    if OPENAQ_COUNTRY_ID:
+        country_id = _safe_int(OPENAQ_COUNTRY_ID)
+        if country_id is None:
+            raise RuntimeError(f"Invalid OPENAQ_COUNTRY_ID={OPENAQ_COUNTRY_ID!r}")
+        return country_id
+
+    countries = fetch_all_pages(f"{OPENAQ_BASE_URL}/countries", {})
+    for country in countries:
+        if _country_matches(country, country_code):
+            country_id = _safe_int(country.get("id"))
+            if country_id is not None:
+                logger.info(
+                    "Resolved OpenAQ country %s to countries_id=%s",
+                    country_code,
+                    country_id,
+                )
+                return country_id
+
+    raise RuntimeError(f"Cannot resolve OpenAQ country id for {country_code!r}")
+
+
 def get_vietnam_locations() -> list[dict]:
-    locations = fetch_all_pages(f"{OPENAQ_BASE_URL}/locations", {"countries_id": 220})
-    if not locations:
-        locations = fetch_all_pages(f"{OPENAQ_BASE_URL}/locations", {"country": "VN"})
+    params = {"countries_id": resolve_country_id()}
+    if OPENAQ_BBOX:
+        params["bbox"] = OPENAQ_BBOX
+
+    locations = fetch_all_pages(f"{OPENAQ_BASE_URL}/locations", params)
+    logger.info("OpenAQ location query params=%s results=%s", params, len(locations))
     return locations
 
 
@@ -275,6 +317,8 @@ def main():
     logger.info(f"  Window mode: {WINDOW_CONFIG.mode}")
     logger.info(f"  Batch lookback days: {WINDOW_CONFIG.batch_lookback_days}")
     logger.info(f"  Realtime lookback minutes: {WINDOW_CONFIG.realtime_lookback_minutes}")
+    logger.info(f"  Country code/id: {OPENAQ_COUNTRY_CODE}/{OPENAQ_COUNTRY_ID or 'auto'}")
+    logger.info(f"  BBOX: {OPENAQ_BBOX or 'not set'}")
     logger.info(
         "  Realtime continuous: "
         f"{WINDOW_CONFIG.continuous if WINDOW_CONFIG.mode == 'realtime' else False}"

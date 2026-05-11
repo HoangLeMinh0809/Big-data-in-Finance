@@ -22,9 +22,9 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_history")
 KAFKA_TOPICS = [
   t.strip()
-  for t in os.getenv(
+    for t in os.getenv(
     "KAFKA_TOPICS",
-    "weather_history,openaq-hourly,sentinel5p-summary,maiac-summary",
+    "weather_history,openaq-hourly,sentinel5p-summary,maiac-summary,era5-files",
   ).split(",")
   if t.strip()
 ]
@@ -47,6 +47,80 @@ INGEST_SOURCES = {
     "sentinel5p": ("sentinel5p-ingest", 7, "sentinel5p-summary"),
     "maiac": ("maiac-ingest", 7, "maiac-summary"),
 }
+
+PIPELINE_DATASETS = [
+    {
+        "source": "WeatherAPI history",
+        "raw": "data/weather or WeatherAPI history endpoint",
+        "topic": "weather_history",
+        "bronze_table": "ais.weather.weather_history_bronze",
+        "bronze_path": "/warehouse/iceberg/weather/weather_history_bronze",
+        "silver_table": "ais.weather.weather_hanoi_surface_proxy_silver",
+        "silver_path": "/warehouse/iceberg/weather/weather_hanoi_surface_proxy_silver",
+        "gold_role": "Hourly proxy features: visibility, UV, condition/rain flags",
+    },
+    {
+        "source": "OpenAQ hourly",
+        "raw": "OpenAQ API",
+        "topic": "openaq-hourly",
+        "bronze_table": "ais.air_quality.openaq_hourly_bronze",
+        "bronze_path": "/warehouse/iceberg/air_quality/openaq_hourly_bronze",
+        "silver_table": "ais.air_quality.openaq_hanoi_hourly_silver",
+        "silver_path": "/warehouse/iceberg/air_quality/openaq_hanoi_hourly_silver",
+        "gold_role": "PM2.5 target, station counts, lag/rolling/forecast targets",
+    },
+    {
+        "source": "ERA5 surface",
+        "raw": "hdfs://namenode:9000/raw/era5/surface",
+        "topic": "era5-files",
+        "bronze_table": "ais.weather.era5_files_bronze",
+        "bronze_path": "/warehouse/iceberg/weather/era5_files_bronze",
+        "silver_table": "ais.weather.era5_surface_hanoi_hourly_silver",
+        "silver_path": "/warehouse/iceberg/weather/era5_surface_hanoi_hourly_silver",
+        "gold_role": "Surface meteorology: wind, PBL, pressure, temperature, precipitation",
+    },
+    {
+        "source": "Sentinel-5P",
+        "raw": "hdfs://namenode:9000/raw/sentinel5p",
+        "topic": "sentinel5p-summary",
+        "bronze_table": "ais.satellite.sentinel5p_summary_bronze",
+        "bronze_path": "/warehouse/iceberg/satellite/sentinel5p_summary_bronze",
+        "silver_table": "ais.satellite.sentinel5p_hanoi_daily_silver",
+        "silver_path": "/warehouse/iceberg/satellite/sentinel5p_hanoi_daily_silver",
+        "gold_role": "Daily satellite pollutant columns: NO2, CO, SO2, O3, AER_AI",
+    },
+    {
+        "source": "MAIAC MODIS AOD",
+        "raw": "crawler/maiac_data or hdfs://namenode:9000/raw/maiac",
+        "topic": "maiac-summary",
+        "bronze_table": "ais.satellite.maiac_summary_bronze",
+        "bronze_path": "/warehouse/iceberg/satellite/maiac_summary_bronze",
+        "silver_table": "ais.satellite.maiac_hanoi_daily_silver",
+        "silver_path": "/warehouse/iceberg/satellite/maiac_hanoi_daily_silver",
+        "gold_role": "Daily AOD features: AOD_047, AOD_055, AOD mean/max",
+    },
+]
+
+GOLD_DATASETS = [
+    {
+        "name": "Master hourly features",
+        "table": "ais.features.hanoi_pm25_master_hourly_gold",
+        "path": "/warehouse/iceberg/features/hanoi_pm25_master_hourly_gold",
+        "description": "One row per Hanoi hour, joined from all silver tables with time, lag, rolling, and future target columns.",
+    },
+    {
+        "name": "Training dataset",
+        "table": "ais.features.hanoi_pm25_training_dataset_gold",
+        "path": "/warehouse/iceberg/features/hanoi_pm25_training_dataset_gold",
+        "description": "Time-ordered train/validation/test rows with dataset_version and feature_set_name.",
+    },
+    {
+        "name": "Model run metadata",
+        "table": "ais.models.hanoi_pm25_model_runs_gold",
+        "path": "/warehouse/iceberg/models/hanoi_pm25_model_runs_gold",
+        "description": "Optional baseline training metadata and metrics for each forecast horizon.",
+    },
+]
 
 # Keep a small in-memory state to estimate throughput.
 _state_lock = threading.Lock()
@@ -205,6 +279,56 @@ HTML_TEMPLATE = """
       margin-bottom: 8px;
     }
 
+    .flow-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    .flow-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .flow-card h3 {
+      font-size: 0.98rem;
+      margin-bottom: 8px;
+      color: var(--ink);
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: 74px 1fr;
+      gap: 8px;
+      padding: 5px 0;
+      border-bottom: 1px dashed #eef2f7;
+      font-size: 0.84rem;
+    }
+
+    .flow-row:last-child {
+      border-bottom: 0;
+    }
+
+    .flow-key {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .mono {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.8rem;
+      word-break: break-word;
+    }
+
+    .mini {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 5px;
+    }
+
     .table {
       width: 100%;
       border-collapse: collapse;
@@ -254,7 +378,16 @@ HTML_TEMPLATE = """
   <div class="wrap">
     <div class="hero">
       <h1>AIS Pipeline Live Monitor</h1>
-      <p>Read-only dashboard, refresh every 5 seconds: Kafka flow, HDFS parquet persistence, DataNode health.</p>
+      <p>Read-only dashboard, refresh every 5 seconds: Kafka flow, HDFS/Iceberg persistence, medallion layers, DataNode health.</p>
+    </div>
+
+    <div class="section">
+      <h2>TODO_1 Medallion Flow</h2>
+      <div class="sub">Raw/API events land in Kafka, Spark writes bronze Iceberg tables on HDFS, Hanoi silver jobs clean and aggregate domain data, then gold builds PM2.5 feature/training datasets.</div>
+      <div class="flow-grid" id="pipeline-flow">
+        <div class="flow-card">Loading pipeline map...</div>
+      </div>
+      <div class="flow-grid" id="gold-flow"></div>
     </div>
 
     <div class="grid">
@@ -352,6 +485,48 @@ HTML_TEMPLATE = """
       return `<span class=\"status warn\">Unknown</span>`;
     }
 
+    function pathStatus(summary) {
+      if (!summary) return '<span class="status warn">Unknown</span>';
+      if (summary.exists && summary.parquet_files > 0) return `<span class="status ok">${summary.parquet_files} parquet</span>`;
+      if (summary.exists) return '<span class="status warn">No parquet</span>';
+      return '<span class="status bad">Missing</span>';
+    }
+
+    function flowCard(row) {
+      return `
+        <div class="flow-card">
+          <h3>${row.source}</h3>
+          <div class="flow-row"><div class="flow-key">Raw</div><div class="mono">${row.raw}</div></div>
+          <div class="flow-row"><div class="flow-key">Kafka</div><div class="mono">${row.topic} ${row.topic_messages !== null ? `(${row.topic_messages} msg)` : ''}</div></div>
+          <div class="flow-row"><div class="flow-key">Bronze</div><div><div class="mono">${row.bronze_table}</div><div class="mini">${pathStatus(row.bronze_status)} ${row.bronze_path}</div></div></div>
+          <div class="flow-row"><div class="flow-key">Silver</div><div><div class="mono">${row.silver_table}</div><div class="mini">${pathStatus(row.silver_status)} ${row.silver_path}</div></div></div>
+          <div class="flow-row"><div class="flow-key">Gold use</div><div>${row.gold_role}</div></div>
+        </div>
+      `;
+    }
+
+    function goldCard(row) {
+      return `
+        <div class="flow-card">
+          <h3>${row.name}</h3>
+          <div class="flow-row"><div class="flow-key">Table</div><div class="mono">${row.table}</div></div>
+          <div class="flow-row"><div class="flow-key">HDFS</div><div><div class="mini">${pathStatus(row.status)} ${row.path}</div></div></div>
+          <div class="flow-row"><div class="flow-key">Role</div><div>${row.description}</div></div>
+        </div>
+      `;
+    }
+
+    async function loadPipeline() {
+      try {
+        const res = await fetch('/api/pipeline');
+        const payload = await res.json();
+        document.getElementById('pipeline-flow').innerHTML = (payload.datasets || []).map(flowCard).join('');
+        document.getElementById('gold-flow').innerHTML = (payload.gold || []).map(goldCard).join('');
+      } catch (err) {
+        document.getElementById('pipeline-flow').innerHTML = `<div class="flow-card">Cannot fetch pipeline map: ${err}</div>`;
+      }
+    }
+
     async function loadMetrics() {
       let payload;
       try {
@@ -401,7 +576,9 @@ HTML_TEMPLATE = """
       document.getElementById('error-box').textContent = errors.join(' | ');
     }
 
+    loadPipeline();
     loadMetrics();
+    setInterval(loadPipeline, 15000);
     setInterval(loadMetrics, 5000);
   </script>
 </body>
@@ -487,6 +664,61 @@ def _walk_hdfs(path):
                     "modificationTime": int(node.get("modificationTime", 0)),
                 })
     return files
+
+
+def _summarize_hdfs_path(path: str) -> dict:
+    try:
+        files = _walk_hdfs(path)
+        parquet_files = [f for f in files if f["path"].endswith(".parquet")]
+        latest_mod = max((f["modificationTime"] for f in parquet_files), default=0)
+        return {
+            "exists": True,
+            "files": len(files),
+            "parquet_files": len(parquet_files),
+            "total_size_bytes": int(sum(f["length"] for f in parquet_files)),
+            "last_modified_utc": datetime.fromtimestamp(latest_mod / 1000, tz=timezone.utc).isoformat() if latest_mod else None,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "exists": False,
+            "files": 0,
+            "parquet_files": 0,
+            "total_size_bytes": 0,
+            "last_modified_utc": None,
+            "error": str(exc),
+        }
+
+
+def collect_pipeline_map() -> dict:
+    topic_counts = {}
+    for topic in KAFKA_TOPICS:
+        topic_counts[topic] = _get_kafka_message_count(topic)
+
+    datasets = []
+    for row in PIPELINE_DATASETS:
+        datasets.append(
+            {
+                **row,
+                "topic_messages": topic_counts.get(row["topic"]),
+                "bronze_status": _summarize_hdfs_path(row["bronze_path"]),
+                "silver_status": _summarize_hdfs_path(row["silver_path"]),
+            }
+        )
+
+    gold = [
+        {
+            **row,
+            "status": _summarize_hdfs_path(row["path"]),
+        }
+        for row in GOLD_DATASETS
+    ]
+
+    return {
+        "polled_at_utc": datetime.now(timezone.utc).isoformat(),
+        "datasets": datasets,
+        "gold": gold,
+    }
 
 
 def _collect_kafka_totals(topic: str):
@@ -884,6 +1116,11 @@ def api_ingest_status():
 @app.route("/api/metrics")
 def api_metrics():
     return jsonify(collect_metrics())
+
+
+@app.route("/api/pipeline")
+def api_pipeline():
+    return jsonify(collect_pipeline_map())
 
 
 @app.route("/healthz")

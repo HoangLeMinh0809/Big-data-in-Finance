@@ -10,6 +10,18 @@ $realtimePollSeconds = if ($env:REALTIME_POLL_SECONDS) { [int]$env:REALTIME_POLL
 $enableAirflow = if ($env:ENABLE_AIRFLOW) { $env:ENABLE_AIRFLOW.ToLower() -eq "true" } else { $false }
 $enableMonitoring = if ($env:ENABLE_MONITORING) { $env:ENABLE_MONITORING.ToLower() -eq "true" } else { $false }
 
+function Show-ContainerDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName
+    )
+
+    Write-Host "[DEBUG] $ContainerName health log:"
+    docker inspect --format '{{range .State.Health.Log}}{{println .ExitCode ":" .Output}}{{end}}' $ContainerName 2>$null | Out-Host
+
+    Write-Host "[DEBUG] $ContainerName container logs (tail):"
+    docker logs --tail 120 $ContainerName 2>&1 | Out-Host
+}
+
 function Wait-ForHealthy {
     param(
         [Parameter(Mandatory = $true)][string]$ContainerName,
@@ -29,6 +41,7 @@ function Wait-ForHealthy {
         }
 
         if ($elapsed -ge $TimeoutSec) {
+            Show-ContainerDiagnostics -ContainerName $ContainerName
             throw "Timeout waiting for $ContainerName (last status=$status)"
         }
 
@@ -39,7 +52,7 @@ function Wait-ForHealthy {
 }
 
 function Ensure-Topics {
-    $topics = @("openaq-hourly", "weather_history", "sentinel5p-summary", "maiac-summary")
+    $topics = @("openaq-hourly", "weather_history", "sentinel5p-summary", "maiac-summary", "era5-files")
 
     Write-Host "=== Create AIS Kafka topics ==="
     foreach ($topic in $topics) {

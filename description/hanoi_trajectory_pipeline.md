@@ -1213,7 +1213,7 @@ for target_col in ["pm25_next_6h", "pm25_next_12h", "pm25_next_24h"]:
 
 ---
 
-## 11) Output — Source attribution + Plume forecast
+### 11) Output — Source attribution + Plume forecast
 
 ### Source attribution (backward)
 
@@ -1284,7 +1284,7 @@ print("Saved: plume forecast grids for 6h / 12h / 24h")
 
 ---
 
-## 12) Pipeline summary — file map
+### 12) Pipeline summary — file map
 
 ```
 raw/

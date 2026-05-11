@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import os
-
 from pyspark.sql import SparkSession
 
-ICEBERG_CATALOG = os.getenv("ICEBERG_CATALOG", "ais")
-ICEBERG_WAREHOUSE = os.getenv("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg")
+from hanoi_config import ICEBERG_CATALOG, ICEBERG_WAREHOUSE, TABLES
 
 
 def build_spark() -> SparkSession:
@@ -21,19 +18,17 @@ def build_spark() -> SparkSession:
     )
 
 
-def ensure_tables(spark: SparkSession) -> None:
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality")
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.satellite")
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.features")
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.models")
+def create_namespaces(spark: SparkSession) -> None:
+    for namespace in ["weather", "air_quality", "satellite", "features", "models"]:
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.{namespace}")
 
-    # ---------------------------------------------------------------------
-    # BRONZE
-    # ---------------------------------------------------------------------
+
+def ensure_tables(spark: SparkSession) -> None:
+    create_namespaces(spark)
+
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.weather_history_bronze (
+        CREATE TABLE IF NOT EXISTS {TABLES["weather_bronze"]} (
             event_id STRING,
             province STRING,
             country STRING,
@@ -99,7 +94,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality.openaq_hourly_bronze (
+        CREATE TABLE IF NOT EXISTS {TABLES["openaq_bronze"]} (
             location_id BIGINT,
             location_name STRING,
             city STRING,
@@ -140,7 +135,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.sentinel5p_summary_bronze (
+        CREATE TABLE IF NOT EXISTS {TABLES["sentinel5p_bronze"]} (
             product STRING,
             collection STRING,
             content_start STRING,
@@ -165,17 +160,34 @@ def ensure_tables(spark: SparkSession) -> None:
             spark_processed_at TIMESTAMP,
             year INT,
             month INT,
-            day INT
+            day INT,
+            download_url STRING,
+            content_length BIGINT,
+            s3_path STRING,
+            raw_file_path STRING,
+            raw_downloaded BOOLEAN,
+            raw_download_error STRING
         )
         USING ICEBERG
         PARTITIONED BY (product, year, month, day)
         TBLPROPERTIES ('format-version'='2')
         """
     )
+    existing_s5p_columns = set(spark.table(TABLES["sentinel5p_bronze"]).columns)
+    for column_name, column_type in [
+        ("download_url", "STRING"),
+        ("content_length", "BIGINT"),
+        ("s3_path", "STRING"),
+        ("raw_file_path", "STRING"),
+        ("raw_downloaded", "BOOLEAN"),
+        ("raw_download_error", "STRING"),
+    ]:
+        if column_name not in existing_s5p_columns:
+            spark.sql(f"ALTER TABLE {TABLES['sentinel5p_bronze']} ADD COLUMN {column_name} {column_type}")
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.maiac_summary_bronze (
+        CREATE TABLE IF NOT EXISTS {TABLES["maiac_bronze"]} (
             event_id STRING,
             granule_id STRING,
             granule_name STRING,
@@ -207,10 +219,9 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
-    # New bronze table: ERA5 raw file metadata
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.era5_files_bronze (
+        CREATE TABLE IF NOT EXISTS {TABLES["era5_files_bronze"]} (
             event_id STRING,
             dataset_type STRING,
             year INT,
@@ -231,12 +242,9 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
-    # ---------------------------------------------------------------------
-    # SILVER (schemas are minimal placeholders; will be refined in later TODOs)
-    # ---------------------------------------------------------------------
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality.openaq_hanoi_station_hourly_silver (
+        CREATE TABLE IF NOT EXISTS {TABLES["openaq_station_silver"]} (
             hour TIMESTAMP,
             location_id BIGINT,
             location_name STRING,
@@ -264,7 +272,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.air_quality.openaq_hanoi_hourly_silver (
+        CREATE TABLE IF NOT EXISTS {TABLES["openaq_hourly_silver"]} (
             hour TIMESTAMP,
             pm25_median DOUBLE,
             pm25_mean DOUBLE,
@@ -286,7 +294,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.weather_hanoi_surface_proxy_silver (
+        CREATE TABLE IF NOT EXISTS {TABLES["weather_proxy_silver"]} (
             hour TIMESTAMP,
             vis_km DOUBLE,
             uv DOUBLE,
@@ -312,7 +320,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.weather.era5_surface_hanoi_hourly_silver (
+        CREATE TABLE IF NOT EXISTS {TABLES["era5_surface_silver"]} (
             hour TIMESTAMP,
             wind_u10 DOUBLE,
             wind_v10 DOUBLE,
@@ -340,7 +348,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.sentinel5p_hanoi_daily_silver (
+        CREATE TABLE IF NOT EXISTS {TABLES["sentinel5p_silver"]} (
             product STRING,
             date DATE,
             overpass_time_utc TIMESTAMP,
@@ -366,7 +374,7 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.satellite.maiac_hanoi_daily_silver (
+        CREATE TABLE IF NOT EXISTS {TABLES["maiac_silver"]} (
             date DATE,
             aod_047_mean DOUBLE,
             aod_055_mean DOUBLE,
@@ -376,11 +384,6 @@ def ensure_tables(spark: SparkSession) -> None:
             aod_std DOUBLE,
             valid_pixel_count BIGINT,
             total_pixel_count BIGINT,
-            valid_pct DOUBLE,
-            tile_count INT,
-            source_files STRING,
-            valid_pixel_count INT,
-            total_pixel_count INT,
             valid_pct DOUBLE,
             tile_count INT,
             source_files ARRAY<STRING>,
@@ -395,17 +398,60 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
-    # ---------------------------------------------------------------------
-    # GOLD (schemas are minimal placeholders; will be refined in later TODOs)
-    # ---------------------------------------------------------------------
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.features.hanoi_pm25_master_hourly_gold (
+        CREATE TABLE IF NOT EXISTS {TABLES["master_gold"]} (
             hour TIMESTAMP,
             pm25_median DOUBLE,
             pm25_mean DOUBLE,
             station_count INT,
             coverage_avg DOUBLE,
+            vis_km DOUBLE,
+            uv DOUBLE,
+            condition_code INT,
+            is_day INT,
+            will_it_rain INT,
+            chance_of_rain INT,
+            wind_u10 DOUBLE,
+            wind_v10 DOUBLE,
+            wind_speed DOUBLE,
+            wind_dir DOUBLE,
+            pbl_height_m DOUBLE,
+            low_pbl BOOLEAN,
+            surface_pressure DOUBLE,
+            temperature_2m_c DOUBLE,
+            dewpoint_2m_c DOUBLE,
+            total_precipitation_mm DOUBLE,
+            s5p_no2_mean DOUBLE,
+            s5p_co_mean DOUBLE,
+            s5p_so2_mean DOUBLE,
+            s5p_o3_mean DOUBLE,
+            s5p_aer_ai_mean DOUBLE,
+            s5p_no2_valid_pct DOUBLE,
+            s5p_aer_ai_valid_pct DOUBLE,
+            aod_047_mean DOUBLE,
+            aod_055_mean DOUBLE,
+            aod_mean DOUBLE,
+            aod_max DOUBLE,
+            aod_valid_pct DOUBLE,
+            hour_of_day INT,
+            day_of_week INT,
+            month INT,
+            season STRING,
+            is_weekend BOOLEAN,
+            pm25_lag_1h DOUBLE,
+            pm25_lag_3h DOUBLE,
+            pm25_lag_6h DOUBLE,
+            pm25_lag_12h DOUBLE,
+            pm25_lag_24h DOUBLE,
+            pm25_roll_mean_3h DOUBLE,
+            pm25_roll_mean_6h DOUBLE,
+            pm25_roll_mean_24h DOUBLE,
+            pm25_roll_max_24h DOUBLE,
+            pm25_roll_std_24h DOUBLE,
+            pm25_next_6h DOUBLE,
+            pm25_next_12h DOUBLE,
+            pm25_next_24h DOUBLE,
             year INT,
             month_partition INT,
             spark_processed_at TIMESTAMP
@@ -418,18 +464,66 @@ def ensure_tables(spark: SparkSession) -> None:
 
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS {ICEBERG_CATALOG}.features.hanoi_pm25_training_dataset_gold (
+        CREATE TABLE IF NOT EXISTS {TABLES["training_gold"]} (
             dataset_version STRING,
             feature_set_name STRING,
             split STRING,
+            feature_groups ARRAY<STRING>,
             created_at TIMESTAMP,
             hour TIMESTAMP,
+            pm25_median DOUBLE,
+            pm25_mean DOUBLE,
+            station_count INT,
+            coverage_avg DOUBLE,
+            vis_km DOUBLE,
+            uv DOUBLE,
+            condition_code INT,
+            is_day INT,
+            will_it_rain INT,
+            chance_of_rain INT,
+            wind_u10 DOUBLE,
+            wind_v10 DOUBLE,
+            wind_speed DOUBLE,
+            wind_dir DOUBLE,
+            pbl_height_m DOUBLE,
+            low_pbl BOOLEAN,
+            surface_pressure DOUBLE,
+            temperature_2m_c DOUBLE,
+            dewpoint_2m_c DOUBLE,
+            total_precipitation_mm DOUBLE,
+            s5p_no2_mean DOUBLE,
+            s5p_co_mean DOUBLE,
+            s5p_so2_mean DOUBLE,
+            s5p_o3_mean DOUBLE,
+            s5p_aer_ai_mean DOUBLE,
+            s5p_no2_valid_pct DOUBLE,
+            s5p_aer_ai_valid_pct DOUBLE,
+            aod_047_mean DOUBLE,
+            aod_055_mean DOUBLE,
+            aod_mean DOUBLE,
+            aod_max DOUBLE,
+            aod_valid_pct DOUBLE,
+            hour_of_day INT,
+            day_of_week INT,
+            month INT,
+            season STRING,
+            is_weekend BOOLEAN,
+            pm25_lag_1h DOUBLE,
+            pm25_lag_3h DOUBLE,
+            pm25_lag_6h DOUBLE,
+            pm25_lag_12h DOUBLE,
+            pm25_lag_24h DOUBLE,
+            pm25_roll_mean_3h DOUBLE,
+            pm25_roll_mean_6h DOUBLE,
+            pm25_roll_mean_24h DOUBLE,
+            pm25_roll_max_24h DOUBLE,
+            pm25_roll_std_24h DOUBLE,
             pm25_next_6h DOUBLE,
             pm25_next_12h DOUBLE,
             pm25_next_24h DOUBLE,
-            spark_processed_at TIMESTAMP,
             year INT,
-            month_partition INT
+            month_partition INT,
+            spark_processed_at TIMESTAMP
         )
         USING ICEBERG
         PARTITIONED BY (year, month_partition)
@@ -437,17 +531,38 @@ def ensure_tables(spark: SparkSession) -> None:
         """
     )
 
-    # NOTE: Per request, do NOT create {ICEBERG_CATALOG}.models.hanoi_pm25_model_runs_gold yet.
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["model_runs_gold"]} (
+            model_run_id STRING,
+            dataset_version STRING,
+            feature_set_name STRING,
+            horizon_hour INT,
+            model_type STRING,
+            model_path STRING,
+            train_start TIMESTAMP,
+            train_end TIMESTAMP,
+            validation_start TIMESTAMP,
+            validation_end TIMESTAMP,
+            test_start TIMESTAMP,
+            test_end TIMESTAMP,
+            mae DOUBLE,
+            rmse DOUBLE,
+            mape DOUBLE,
+            feature_importance_path STRING,
+            created_at TIMESTAMP
+        )
+        USING ICEBERG
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
 
 
 def main() -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
     ensure_tables(spark)
-    print(
-        "Ensured Iceberg namespaces and tables for weather/air_quality/satellite + Hanoi silver/gold placeholders"
-    )
-    print("Ensured Iceberg namespaces and tables for weather, openaq, sentinel5p, maiac, hanoi silver")
+    print("Ensured Iceberg namespaces and TODO_1 bronze/silver/gold/model tables")
     spark.stop()
 
 

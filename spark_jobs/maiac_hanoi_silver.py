@@ -16,13 +16,21 @@ from pyspark.sql.types import (
     DateType,
     DoubleType,
     IntegerType,
+    LongType,
     StringType,
     StructField,
     StructType,
     TimestampType,
 )
 
-from hanoi_config import ICEBERG_CATALOG, ICEBERG_WAREHOUSE, get_hanoi_bbox, get_table_names
+from hanoi_config import (
+    ICEBERG_CATALOG,
+    ICEBERG_WAREHOUSE,
+    get_hanoi_bbox,
+    get_maiac_local_fallback_path,
+    get_maiac_scale_factor,
+    get_table_names,
+)
 
 
 OUTPUT_COLUMNS = [
@@ -53,8 +61,8 @@ OUTPUT_SCHEMA = StructType(
         StructField("aod_min", DoubleType(), True),
         StructField("aod_max", DoubleType(), True),
         StructField("aod_std", DoubleType(), True),
-        StructField("valid_pixel_count", IntegerType(), True),
-        StructField("total_pixel_count", IntegerType(), True),
+        StructField("valid_pixel_count", LongType(), True),
+        StructField("total_pixel_count", LongType(), True),
         StructField("valid_pct", DoubleType(), True),
         StructField("tile_count", IntegerType(), True),
         StructField("source_files", ArrayType(StringType()), True),
@@ -73,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-refresh", default=os.getenv("FULL_REFRESH", "0"))
     parser.add_argument(
         "--local-fallback-path",
-        default=os.getenv("MAIAC_LOCAL_FALLBACK_PATH", "/opt/maiac_data"),
+        default=os.getenv("MAIAC_LOCAL_FALLBACK_PATH", get_maiac_local_fallback_path()),
     )
     parser.add_argument("--relaxed-qa", default=os.getenv("MAIAC_RELAXED_QA", "0"))
     return parser.parse_args()
@@ -114,8 +122,8 @@ def ensure_table(spark: SparkSession, table_name: str) -> None:
             aod_min DOUBLE,
             aod_max DOUBLE,
             aod_std DOUBLE,
-            valid_pixel_count INT,
-            total_pixel_count INT,
+            valid_pixel_count BIGINT,
+            total_pixel_count BIGINT,
             valid_pct DOUBLE,
             tile_count INT,
             source_files ARRAY<STRING>,
@@ -270,16 +278,17 @@ def _tile_lat_lon(tile: str, shape: tuple[int, int]):
     rows, cols = shape
 
     earth_radius = 6371007.181
-    tile_size_rad = 10 * math.pi / 18
+    tile_size_rad = math.radians(10.0)
     tile_size_m = tile_size_rad * earth_radius
     x0 = (tile_h - 18) * tile_size_m
     y0 = (9 - tile_v) * tile_size_m
-    res = tile_size_m / rows
+    x_res = tile_size_m / cols
+    y_res = tile_size_m / rows
 
     col_idx = np.arange(cols)
     row_idx = np.arange(rows)[:, None]
-    x = x0 + (col_idx + 0.5) * res
-    y = y0 - (row_idx + 0.5) * res
+    x = x0 + (col_idx + 0.5) * x_res
+    y = y0 - (row_idx + 0.5) * y_res
 
     lat = np.degrees(y / earth_radius)
     lon = np.degrees(x / (earth_radius * np.cos(y / earth_radius)))
@@ -315,8 +324,9 @@ def read_maiac_hdf(path: Path, bbox: dict[str, float], relaxed_qa: bool) -> dict
     finally:
         hdf.end()
 
-    aod_047 = aod_047 * 0.001
-    aod_055 = aod_055 * 0.001
+    scale_factor = get_maiac_scale_factor()
+    aod_047 = aod_047 * scale_factor
+    aod_055 = aod_055 * scale_factor
     qa_good = _qa_mask(qa_values, aod_047.shape, relaxed_qa=relaxed_qa)
     lat, lon = _tile_lat_lon(meta["tile"], aod_047.shape)
 

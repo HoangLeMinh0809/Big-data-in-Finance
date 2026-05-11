@@ -10,6 +10,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$ROOT_DIR"
 
+print_container_diagnostics() {
+  local container_name="$1"
+
+  echo "[DEBUG] ${container_name} health log:"
+  docker inspect -f '{{range .State.Health.Log}}{{println .ExitCode ":" .Output}}{{end}}' "$container_name" 2>/dev/null || true
+
+  echo "[DEBUG] ${container_name} container logs (tail):"
+  docker logs --tail 120 "$container_name" 2>&1 || true
+}
+
 wait_for_healthy() {
   local container_name="$1"
   local timeout_sec="${2:-300}"
@@ -26,6 +36,7 @@ wait_for_healthy() {
 
     if [ "$elapsed" -ge "$timeout_sec" ]; then
       echo "[ERROR] Timeout waiting for $container_name (last status=$status)"
+      print_container_diagnostics "$container_name"
       return 1
     fi
 

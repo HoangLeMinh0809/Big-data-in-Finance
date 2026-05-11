@@ -46,13 +46,17 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 168        # giữ message 7 ngày
       KAFKA_MESSAGE_MAX_BYTES: 10485760     # 10MB max message size
     networks:
       - bigdata-net
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server kafka:9092 >/dev/null 2>&1"]
       interval: 15s
       timeout: 10s
       retries: 20
@@ -108,7 +112,11 @@ services:
   # SPARK MASTER — điều phối Spark jobs
   # ---------------------------------------------------------------------------
   spark-master:
-    image: apache/spark:3.5.3
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: ais-spark:3.5.3
+    pull_policy: never
     container_name: spark-master
     hostname: spark-master
     ports:
@@ -121,6 +129,9 @@ services:
     user: root
     volumes:
       - ./spark_jobs:/opt/spark-jobs
+      - ./ml:/opt/ml
+      - ./models:/opt/models
+      - ./config:/opt/config:ro
       - ./checkpoints:/opt/checkpoints
       - ./crawler/maiac_data:/opt/maiac_data:ro
       - spark_ivy_cache:/root/.ivy2
@@ -131,7 +142,11 @@ services:
   # SPARK WORKER — thực thi tasks từ Spark Master
   # ---------------------------------------------------------------------------
   spark-worker:
-    image: apache/spark:3.5.3
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: ais-spark:3.5.3
+    pull_policy: never
     container_name: spark-worker
     hostname: spark-worker
     depends_on:
@@ -144,6 +159,9 @@ services:
     user: root
     volumes:
       - ./spark_jobs:/opt/spark-jobs
+      - ./ml:/opt/ml
+      - ./models:/opt/models
+      - ./config:/opt/config:ro
       - ./checkpoints:/opt/checkpoints
       - ./crawler/maiac_data:/opt/maiac_data:ro
       - spark_ivy_cache:/root/.ivy2
@@ -167,12 +185,16 @@ services:
       KAFKA_TOPIC: weather_history
       KAFKA_CONNECT_MAX_RETRIES: "120"
       KAFKA_CONNECT_RETRY_DELAY: "5"
+      # CDS API credentials for ERA5 ingest
+      CDS_URL: ${CDS_URL:-}
+      CDS_KEY: ${CDS_KEY:-}
       # ERA5 ingest defaults (used by ingest/era5_ingest.py when submitted via scripts/submit_spark.sh era5-ingest)
       ERA5_START_DATE: ${ERA5_START_DATE:-}
       ERA5_END_DATE: ${ERA5_END_DATE:-}
       ERA5_DATASET_TYPE: ${ERA5_DATASET_TYPE:-surface}
       ERA5_OUTPUT_BASE_PATH: ${ERA5_OUTPUT_BASE_PATH:-}
       ERA5_SKIP_EXISTING: ${ERA5_SKIP_EXISTING:-true}
+      WEBHDFS_BASE: http://namenode:9870/webhdfs/v1
       SOURCE_MODE: ${WEATHER_SOURCE_MODE:-api}
       WEATHER_API_KEY: ${WEATHER_API_KEY:-}
       WEATHER_QUERY_LIST: "${WEATHER_QUERY_LIST:-}"
@@ -195,6 +217,7 @@ services:
       # Khoảng cách giữa các vòng thu thập (giây). 86400=1 ngày, 0=chạy 1 lần
       SCRAPE_INTERVAL_SECONDS: "86400"
     volumes:
+      - ./config:/app/config:ro
       - ./checkpoints:/opt/checkpoints
     command: ["python", "-u", "ingest_weather.py"]
     networks:
@@ -218,6 +241,9 @@ services:
       KAFKA_CONNECT_MAX_RETRIES: "120"
       KAFKA_CONNECT_RETRY_DELAY: "5"
       OPENAQ_API_KEY: ${OPENAQ_API_KEY:-}
+      OPENAQ_COUNTRY_CODE: ${OPENAQ_COUNTRY_CODE:-VN}
+      OPENAQ_COUNTRY_ID: ${OPENAQ_COUNTRY_ID:-56}
+      OPENAQ_BBOX: ${OPENAQ_BBOX:-105.25,20.55,106.10,21.40}
       WINDOW_MODE: ${OPENAQ_WINDOW_MODE:-batch}
       BATCH_LOOKBACK_DAYS: ${OPENAQ_BATCH_LOOKBACK_DAYS:-7}
       REALTIME_LOOKBACK_MINUTES: ${OPENAQ_REALTIME_LOOKBACK_MINUTES:-10}
@@ -281,7 +307,10 @@ services:
   # MONITORING UI — theo dõi throughput và trạng thái lưu dữ liệu vào HDFS
   # ---------------------------------------------------------------------------
   monitoring-ui:
-    image: ais-airflow:2.9.3
+    build:
+      context: ./monitoring
+      dockerfile: Dockerfile
+    image: ais-monitoring:latest
     pull_policy: never
     container_name: monitoring-ui
     hostname: monitoring-ui
@@ -296,11 +325,12 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: weather_history
+      KAFKA_TOPICS: weather_history,openaq-hourly,sentinel5p-summary,maiac-summary,era5-files
       HDFS_WEBHDFS_BASE: http://namenode:9870/webhdfs/v1
       HDFS_OUTPUT_PATH: /warehouse/iceberg
       NAMENODE_JMX_URL: http://namenode:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystem
       AIRFLOW_API_BASE: http://airflow-webserver:8080/api/v1
-      AIRFLOW_DAG_ID: ais_batch_orchestration
+      AIRFLOW_DAG_ID: ais_hanoi_silver_gold
       AIRFLOW_USERNAME: admin
       AIRFLOW_PASSWORD: admin
       METRICS_SAMPLE_SECONDS: "5"
@@ -308,12 +338,6 @@ services:
     working_dir: /app
     volumes:
       - ./monitoring:/app
-    command: >
-      bash -c "if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-      apt-get update && apt-get install -y --no-install-recommends docker-compose-plugin || apt-get install -y --no-install-recommends docker-compose || true;
-      fi &&
-      python -m pip install --no-cache-dir -r requirements.txt &&
-      python -u app.py"
     ports:
       - "8501:8501"
     networks:
@@ -330,6 +354,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      namenode:
+        condition: service_healthy
     restart: on-failure
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
@@ -339,7 +365,7 @@ services:
       # Credentials: set in your environment or .env (do not commit)
       CDSE_USERNAME: ${CDSE_USERNAME:-}
       CDSE_PASSWORD: ${CDSE_PASSWORD:-}
-      BBOX: "100,8,110,24"
+      BBOX: ${S5P_BBOX:-100,8,110,24}
       WINDOW_MODE: ${S5P_WINDOW_MODE:-batch}
       BATCH_LOOKBACK_DAYS: ${S5P_BATCH_LOOKBACK_DAYS:-7}
       REALTIME_LOOKBACK_MINUTES: ${S5P_REALTIME_LOOKBACK_MINUTES:-10}
@@ -348,8 +374,13 @@ services:
       WINDOW_START_UTC: "${S5P_WINDOW_START_UTC:-}"
       WINDOW_END_UTC: "${S5P_WINDOW_END_UTC:-}"
       WINDOW_STATE_FILE: /opt/checkpoints/runtime_state/sentinel5p_window_state.json
-      MAX_RESULTS: "1"
-      PRODUCTS: "NO2,CO,O3,SO2,CH4,AER"
+      MAX_RESULTS: ${S5P_MAX_RESULTS:-1}
+      PRODUCTS: ${S5P_PRODUCTS:-NO2,CO,O3,SO2,AER}
+      S5P_DOWNLOAD_RAW: ${S5P_DOWNLOAD_RAW:-false}
+      S5P_RAW_HDFS_BASE_PATH: ${S5P_RAW_HDFS_BASE_PATH:-/raw/sentinel5p}
+      HDFS_WEBHDFS_BASE: ${HDFS_WEBHDFS_BASE:-http://namenode:9870/webhdfs/v1}
+      DOWNLOAD_TIMEOUT_SEC: ${S5P_DOWNLOAD_TIMEOUT_SEC:-900}
+      S5P_MAX_DOWNLOAD_BYTES: ${S5P_MAX_DOWNLOAD_BYTES:-0}
     volumes:
       - ./checkpoints:/opt/checkpoints
     command: ["python", "-u", "sentinel5p_ingest.py"]

@@ -21,7 +21,9 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.types import (
     ArrayType,
+    BooleanType,
     DoubleType,
+    LongType,
     StringType,
     StructField,
     StructType,
@@ -50,6 +52,12 @@ SENTINEL5P_SCHEMA = StructType(
         StructField("product_name", StringType(), True),
         StructField("product_id", StringType(), True),
         StructField("file_name", StringType(), True),
+        StructField("download_url", StringType(), True),
+        StructField("content_length", LongType(), True),
+        StructField("s3_path", StringType(), True),
+        StructField("raw_file_path", StringType(), True),
+        StructField("raw_downloaded", BooleanType(), True),
+        StructField("raw_download_error", StringType(), True),
         StructField(
             "stats",
             StructType(
@@ -151,6 +159,12 @@ def main() -> None:
             "year",
             "month",
             "day",
+            "download_url",
+            "content_length",
+            "s3_path",
+            "raw_file_path",
+            "raw_downloaded",
+            "raw_download_error",
         )
         .drop("content_start_ts")
     )
@@ -183,13 +197,31 @@ def main() -> None:
             spark_processed_at TIMESTAMP,
             year INT,
             month INT,
-            day INT
+            day INT,
+            download_url STRING,
+            content_length BIGINT,
+            s3_path STRING,
+            raw_file_path STRING,
+            raw_downloaded BOOLEAN,
+            raw_download_error STRING
         )
         USING ICEBERG
         PARTITIONED BY (product, year, month, day)
         TBLPROPERTIES ('format-version'='2')
         """
     )
+
+    existing_columns = set(spark.table(ICEBERG_TABLE).columns)
+    for column_name, column_type in [
+        ("download_url", "STRING"),
+        ("content_length", "BIGINT"),
+        ("s3_path", "STRING"),
+        ("raw_file_path", "STRING"),
+        ("raw_downloaded", "BOOLEAN"),
+        ("raw_download_error", "STRING"),
+    ]:
+        if column_name not in existing_columns:
+            spark.sql(f"ALTER TABLE {ICEBERG_TABLE} ADD COLUMN {column_name} {column_type}")
 
     writer = (
         final_df.writeStream

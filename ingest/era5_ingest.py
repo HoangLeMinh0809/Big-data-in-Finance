@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import logging
 import os
+import posixpath
 import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import cdsapi
+import requests
 
 from kafka_utils import create_kafka_producer, send_event
 
@@ -134,49 +136,53 @@ def _split_hdfs_uri(uri: str) -> tuple[str, str]:
     return host_port, "/" + path
 
 
-def _hdfs_path_exists(hdfs_uri: str, namenode_container: str = "namenode") -> bool:
-    host_port, abs_path = _split_hdfs_uri(hdfs_uri)
-    _ = host_port  # The container already knows the namenode.
-    # Using docker exec keeps this repo self-contained.
-    import subprocess
+def _webhdfs_base() -> str:
+    return os.getenv("WEBHDFS_BASE", "http://namenode:9870/webhdfs/v1").rstrip("/")
 
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            namenode_container,
-            "hdfs",
-            "dfs",
-            "-test",
-            "-e",
-            abs_path,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+
+def _webhdfs_path_url(hdfs_uri: str) -> str:
+    _, abs_path = _split_hdfs_uri(hdfs_uri)
+    return f"{_webhdfs_base()}{abs_path}"
+
+
+def _hdfs_path_exists(hdfs_uri: str) -> bool:
+    url = _webhdfs_path_url(hdfs_uri)
+    response = requests.get(
+        url,
+        params={"op": "GETFILESTATUS", "user.name": os.getenv("HDFS_USER", "root")},
+        timeout=30,
     )
-    return result.returncode == 0
+    if response.status_code == 200:
+        return True
+    if response.status_code == 404:
+        return False
+    response.raise_for_status()
+    return False
 
 
-def _hdfs_put(local_path: Path, hdfs_uri: str, namenode_container: str = "namenode") -> None:
-    host_port, abs_path = _split_hdfs_uri(hdfs_uri)
-    _ = host_port
-    import subprocess
-
-    # Ensure folder exists.
-    parent = str(Path(abs_path).parent).replace("\\", "/")
-    subprocess.check_call(
-        ["docker", "exec", namenode_container, "hdfs", "dfs", "-mkdir", "-p", parent]
+def _hdfs_mkdirs(hdfs_uri: str) -> None:
+    _, abs_path = _split_hdfs_uri(hdfs_uri)
+    parent = posixpath.dirname(abs_path)
+    url = f"{_webhdfs_base()}{parent}"
+    response = requests.put(
+        url,
+        params={"op": "MKDIRS", "user.name": os.getenv("HDFS_USER", "root")},
+        timeout=60,
     )
+    response.raise_for_status()
 
-    # Copy file into namenode container then put to HDFS.
-    tmp_container_path = f"/tmp/{local_path.name}"
-    subprocess.check_call(["docker", "cp", str(local_path), f"{namenode_container}:{tmp_container_path}"])
-    try:
-        subprocess.check_call(
-            ["docker", "exec", namenode_container, "hdfs", "dfs", "-put", "-f", tmp_container_path, abs_path]
-        )
-    finally:
-        subprocess.run(["docker", "exec", namenode_container, "rm", "-f", tmp_container_path])
+
+def _hdfs_put(local_path: Path, hdfs_uri: str) -> None:
+    _hdfs_mkdirs(hdfs_uri)
+    url = _webhdfs_path_url(hdfs_uri)
+    params = {
+        "op": "CREATE",
+        "overwrite": "true",
+        "user.name": os.getenv("HDFS_USER", "root"),
+    }
+    with local_path.open("rb") as f:
+        response = requests.put(url, params=params, data=f, allow_redirects=True)
+    response.raise_for_status()
 
 
 def _build_surface_request(
@@ -233,12 +239,7 @@ def _event_payload(
         "month": month,
         "start_time": _utc(start_utc).isoformat(),
         "end_time": _utc(end_utc).isoformat(),
-        "bbox": {
-            "north": region.north,
-            "west": region.west,
-            "south": region.south,
-            "east": region.east,
-        },
+        "bbox": [region.west, region.south, region.east, region.north],
         "file_path": file_path,
         "file_size": int(file_size),
         "checksum": checksum,
@@ -310,7 +311,15 @@ def main() -> None:
     months = _iter_months(start_d, end_d)
     logger.info(f"ERA5 ingest months: {months}")
 
-    client = cdsapi.Client()
+    # Initialize CDS client with credentials from environment
+    cds_url = os.environ.get("CDS_URL", "https://cds.climate.copernicus.eu/api/v2")
+    cds_key = os.environ.get("CDS_KEY")
+    
+    if not cds_key:
+        raise ValueError("CDS_KEY environment variable is required for ERA5 ingest")
+    
+    logger.info(f"Connecting to CDS: {cds_url}")
+    client = cdsapi.Client(url=cds_url, key=cds_key)
 
     for year, month in months:
         hdfs_path = (

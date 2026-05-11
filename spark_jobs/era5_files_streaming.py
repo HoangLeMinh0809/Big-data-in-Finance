@@ -58,18 +58,7 @@ ERA5_SCHEMA = StructType(
         StructField("month", IntegerType(), True),
         StructField("start_time", StringType(), True),
         StructField("end_time", StringType(), True),
-        StructField(
-            "bbox",
-            StructType(
-                [
-                    StructField("north", DoubleType(), True),
-                    StructField("west", DoubleType(), True),
-                    StructField("south", DoubleType(), True),
-                    StructField("east", DoubleType(), True),
-                ]
-            ),
-            True,
-        ),
+        StructField("bbox", ArrayType(DoubleType()), True),
         StructField("file_path", StringType(), True),
         StructField("file_size", LongType(), True),
         StructField("checksum", StringType(), True),
@@ -116,7 +105,6 @@ def main() -> None:
         .withColumn("start_time", to_timestamp(col("start_time")))
         .withColumn("end_time", to_timestamp(col("end_time")))
         .withColumn("ingest_time", to_timestamp(col("ingest_time")))
-        .withColumn("bbox", col("bbox").cast(ERA5_SCHEMA["bbox"].dataType))
         .withColumn("spark_processed_at", current_timestamp().cast(TimestampType()))
         .dropDuplicates(["event_id"])
     )
@@ -127,10 +115,10 @@ def main() -> None:
         final_df.writeStream.format("iceberg")
         .outputMode("append")
         .option("checkpointLocation", CHECKPOINT_PATH)
-        .option("path", ICEBERG_TABLE)
+        .queryName("era5_files_to_iceberg")
     )
 
-    query = apply_stream_trigger(writer, stop_after_batch=stop_after_batch, processing_time=processing_time).start()
+    query = apply_stream_trigger(writer, stop_after_batch=stop_after_batch, processing_time=processing_time).toTable(ICEBERG_TABLE)
     query.awaitTermination()
 
 
