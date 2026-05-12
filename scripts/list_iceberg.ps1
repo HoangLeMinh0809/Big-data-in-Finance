@@ -53,7 +53,7 @@ function Invoke-Compose {
     return $LASTEXITCODE
 }
 
-function Run-SparkSql {
+function Invoke-SparkSql {
     param([string]$Query)
 
     $confArgs = @(
@@ -63,11 +63,11 @@ function Run-SparkSql {
         "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.warehouse=$env:ICEBERG_WAREHOUSE"
     )
 
-    $args = $confArgs + @("-e", $Query)
+    $sparkSqlArgs = $confArgs + @("-e", $Query)
 
     $spark = Get-Command spark-sql -ErrorAction SilentlyContinue
     if ($spark -and -not $UseDocker) {
-        & spark-sql @args
+        & spark-sql @sparkSqlArgs
         return $LASTEXITCODE
     }
 
@@ -100,33 +100,33 @@ Write-Host "Using Iceberg warehouse: $env:ICEBERG_WAREHOUSE" -ForegroundColor Cy
 if ($DescribeAll) {
     if (-not $Table) { Write-Error "-DescribeAll requires -Table <catalog.namespace.table>"; exit 3 }
     Write-Host "Describing table $Table..." -ForegroundColor Green
-    Run-SparkSql "DESCRIBE TABLE $Table;"
+    Invoke-SparkSql "DESCRIBE TABLE $Table;"
     if ($Count) {
         Write-Host "Counting rows in $Table..." -ForegroundColor Green
-        Run-SparkSql "SELECT COUNT(*) FROM $Table;"
+        Invoke-SparkSql "SELECT COUNT(*) FROM $Table;"
     }
     Write-Host "Selecting sample rows from $Table..." -ForegroundColor Green
-    Run-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
+    Invoke-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
     exit 0
 }
 
 Write-Host "Showing namespaces in catalog $env:ICEBERG_CATALOG..." -ForegroundColor Green
-Run-SparkSql "SHOW NAMESPACES IN $env:ICEBERG_CATALOG;"
+Invoke-SparkSql "SHOW NAMESPACES IN $env:ICEBERG_CATALOG;"
 
 if ($Namespace) {
     Write-Host "Showing tables in $env:ICEBERG_CATALOG.$Namespace..." -ForegroundColor Green
-    Run-SparkSql "SHOW TABLES IN $env:ICEBERG_CATALOG.$Namespace;"
+    Invoke-SparkSql "SHOW TABLES IN $env:ICEBERG_CATALOG.$Namespace;"
 }
 
 if ($Table) {
     Write-Host "Describing table $Table..." -ForegroundColor Green
-    Run-SparkSql "DESCRIBE TABLE $Table;"
+    Invoke-SparkSql "DESCRIBE TABLE $Table;"
     if ($Count) {
         Write-Host "Counting rows in $Table..." -ForegroundColor Green
-        Run-SparkSql "SELECT COUNT(*) FROM $Table;"
+        Invoke-SparkSql "SELECT COUNT(*) FROM $Table;"
     }
     Write-Host "Selecting sample rows from $Table..." -ForegroundColor Green
-    Run-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
+    Invoke-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
 }
 
 Write-Host "Done." -ForegroundColor Cyan

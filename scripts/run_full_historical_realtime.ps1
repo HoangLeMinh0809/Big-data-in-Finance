@@ -51,7 +51,7 @@ function Wait-ForHealthy {
     }
 }
 
-function Ensure-Topics {
+function Initialize-Topics {
     $topics = @("openaq-hourly", "weather_history", "sentinel5p-summary", "maiac-summary", "era5-files")
 
     Write-Host "=== Create AIS Kafka topics ==="

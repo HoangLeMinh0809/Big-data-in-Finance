@@ -19,7 +19,7 @@ def build_spark() -> SparkSession:
 
 
 def create_namespaces(spark: SparkSession) -> None:
-    for namespace in ["weather", "air_quality", "satellite", "features", "models"]:
+    for namespace in ["weather", "air_quality", "satellite", "features", "models", "trajectory"]:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.{namespace}")
 
 
@@ -527,6 +527,171 @@ def ensure_tables(spark: SparkSession) -> None:
         )
         USING ICEBERG
         PARTITIONED BY (year, month_partition)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["era5_arl_bronze"]} (
+            dataset_type STRING,
+            year INT,
+            month INT,
+            source_nc STRING,
+            arl_path STRING,
+            checksum STRING,
+            created_at TIMESTAMP,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (dataset_type, year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["hysplit_runs_bronze"]} (
+            run_id STRING,
+            direction STRING,
+            init_time TIMESTAMP,
+            duration_hours INT,
+            init_lat DOUBLE,
+            init_lon DOUBLE,
+            init_alt_m DOUBLE,
+            arl_path STRING,
+            output_path STRING,
+            status STRING,
+            error_message STRING,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (direction)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["hysplit_traj_silver"]} (
+            traj_id STRING,
+            direction STRING,
+            traj_no INT,
+            year INT,
+            month INT,
+            day INT,
+            hour INT,
+            minute INT,
+            forecast_hour INT,
+            age_h INT,
+            lat DOUBLE,
+            lon DOUBLE,
+            alt_m DOUBLE,
+            timestamp TIMESTAMP,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (direction, year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["hysplit_cluster_silver"]} (
+            traj_id STRING,
+            cluster_id INT,
+            direction STRING,
+            age_h INT,
+            lat DOUBLE,
+            lon DOUBLE,
+            alt_m DOUBLE,
+            timestamp TIMESTAMP,
+            source_lat DOUBLE,
+            source_lon DOUBLE,
+            source_alt_m DOUBLE,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (direction)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["openaq_gradient_silver"]} (
+            hour TIMESTAMP,
+            pm25_grad_n DOUBLE,
+            pm25_grad_s DOUBLE,
+            pm25_grad_e DOUBLE,
+            pm25_grad_w DOUBLE,
+            pm25_spatial_std DOUBLE,
+            pm25_grad_mag DOUBLE,
+            spark_processed_at TIMESTAMP,
+            year INT,
+            month INT
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["s5p_grid_silver"]} (
+            product STRING,
+            date DATE,
+            lat DOUBLE,
+            lon DOUBLE,
+            value DOUBLE,
+            valid_pct DOUBLE,
+            source_file STRING,
+            year INT,
+            month INT,
+            day INT,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (product, year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["trajectory_path_silver"]} (
+            traj_id STRING,
+            path_no2_mean DOUBLE,
+            path_aer_mean DOUBLE,
+            path_no2_max DOUBLE,
+            path_no2_std DOUBLE,
+            path_no2_aer_ratio DOUBLE,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLES["trajectory_hourly_silver"]} (
+            hour TIMESTAMP,
+            dominant_cluster INT,
+            n_traj INT,
+            source_lat DOUBLE,
+            source_lon DOUBLE,
+            path_no2_mean DOUBLE,
+            path_aer_mean DOUBLE,
+            path_no2_aer_ratio DOUBLE,
+            spark_processed_at TIMESTAMP,
+            year INT,
+            month INT
+        )
+        USING ICEBERG
+        PARTITIONED BY (year, month)
         TBLPROPERTIES ('format-version'='2')
         """
     )
