@@ -24,7 +24,7 @@ param(
     [switch]$UseDocker,
     [string]$DockerService = "spark-master",
     [string]$DockerSparkSqlPath = "/opt/spark/bin/spark-sql",
-    [string]$SparkPackages = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2"
+    [string]$SparkPackages = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
 )
 
 $script:ComposeCmd = $null
@@ -56,7 +56,10 @@ function Invoke-Compose {
 function Invoke-SparkSql {
     param([string]$Query)
 
+    $derbyHome = "/tmp/spark-sql-metastore-$([guid]::NewGuid().ToString('N'))"
     $confArgs = @(
+        "--conf", "spark.sql.catalogImplementation=in-memory",
+        "--conf", "spark.driver.extraJavaOptions=-Dderby.system.home=$derbyHome",
         "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
         "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG=org.apache.iceberg.spark.SparkCatalog",
         "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.type=hadoop",
@@ -66,21 +69,19 @@ function Invoke-SparkSql {
     $sparkSqlArgs = $confArgs + @("-e", $Query)
 
     $spark = Get-Command spark-sql -ErrorAction SilentlyContinue
-    if ($spark -and -not $UseDocker) {
+    if ($spark -and -not $UseDocker -and -not $script:ComposeCmd) {
         & spark-sql @sparkSqlArgs
         return $LASTEXITCODE
     }
 
-    if (-not $spark -and -not $UseDocker) {
-        Write-Warning "spark-sql not found in PATH; falling back to Docker Compose."
+    if (-not $UseDocker) {
+        if ($script:ComposeCmd) {
+            Write-Warning "Using Docker Compose Spark SQL to avoid local Spark/Python dependency drift."
+        } elseif (-not $spark) {
+            Write-Warning "spark-sql not found in PATH; falling back to Docker Compose."
+        }
     }
 
-    $confArgs = @(
-        "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG=org.apache.iceberg.spark.SparkCatalog",
-        "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.type=hadoop",
-        "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.warehouse=$env:ICEBERG_WAREHOUSE"
-    )
     $packageArgs = @()
     if ($SparkPackages) {
         $packageArgs = @("--packages", $SparkPackages)

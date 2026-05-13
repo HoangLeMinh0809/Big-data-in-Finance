@@ -727,7 +727,7 @@ def main() -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
     ensure_tables(spark)
-    print("Ensured Iceberg namespaces and TODO_1 bronze/silver/gold/model tables")
+    print("Ensured Iceberg namespaces and TODO_1/TODO_2 bronze/silver/gold/model tables")
     spark.stop()
 
 
