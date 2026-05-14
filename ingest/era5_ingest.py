@@ -50,6 +50,11 @@ def _parse_date(value: str) -> date:
     return date.fromisoformat(value)
 
 
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hour_text, minute_text = value.split(":", 1)
+    return int(hour_text), int(minute_text)
+
+
 def _month_start(d: date) -> date:
     return d.replace(day=1)
 
@@ -110,6 +115,24 @@ def _surface_vars_from_cfg(cfg: dict[str, Any]) -> list[str]:
     era5 = _require_mapping(cfg, "era5")
     variables = _require_list(era5, "surface_variables")
     return [str(v) for v in variables]
+
+
+def _pressure_level_vars_from_cfg(cfg: dict[str, Any]) -> list[str]:
+    era5 = _require_mapping(cfg, "era5")
+    variables = _require_list(era5, "pressure_level_variables")
+    return [str(v) for v in variables]
+
+
+def _pressure_levels_from_cfg(cfg: dict[str, Any]) -> list[str]:
+    era5 = _require_mapping(cfg, "era5")
+    levels = _require_list(era5, "pressure_levels")
+    return [str(v) for v in levels]
+
+
+def _pressure_level_times_from_cfg(cfg: dict[str, Any]) -> list[str]:
+    era5 = _require_mapping(cfg, "era5")
+    times = _require_list(era5, "pressure_levels_time_utc")
+    return [str(v) for v in times]
 
 
 def _raw_base_path_from_cfg(cfg: dict[str, Any]) -> str:
@@ -193,6 +216,8 @@ def _build_surface_request(
     month: int,
     start_date: date,
     end_date: date,
+    times: list[str] | None = None,
+    output_format: str = "netcdf",
 ) -> dict[str, Any]:
     # Only request days within the window.
     month_first = date(year, month, 1)
@@ -213,9 +238,46 @@ def _build_surface_request(
         "year": [str(year)],
         "month": [f"{month:02d}"],
         "day": days,
-        "time": [f"{h:02d}:00" for h in range(24)],
+        "time": times or [f"{h:02d}:00" for h in range(24)],
         "area": [region.north, region.west, region.south, region.east],
-        "format": "netcdf",
+        "format": output_format,
+    }
+
+
+def _build_pressure_levels_request(
+    *,
+    variables: list[str],
+    pressure_levels: list[str],
+    times: list[str],
+    region: Era5Region,
+    year: int,
+    month: int,
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    # Only request days within the window.
+    month_first = date(year, month, 1)
+    month_last = _next_month(month_first) - timedelta(days=1)
+
+    req_start = max(start_date, month_first)
+    req_end = min(end_date, month_last)
+
+    days: list[str] = []
+    cur = req_start
+    while cur <= req_end:
+        days.append(f"{cur.day:02d}")
+        cur = cur + timedelta(days=1)
+
+    return {
+        "product_type": "reanalysis",
+        "variable": variables,
+        "pressure_level": pressure_levels,
+        "year": [str(year)],
+        "month": [f"{month:02d}"],
+        "day": days,
+        "time": times,
+        "area": [region.north, region.west, region.south, region.east],
+        "format": "grib",
     }
 
 
@@ -230,6 +292,9 @@ def _event_payload(
     file_path: str,
     file_size: int,
     checksum: str,
+    surface_file_path: str | None = None,
+    surface_file_size: int | None = None,
+    surface_checksum: str | None = None,
 ) -> dict[str, Any]:
     ingest_time = datetime.now(timezone.utc)
     return {
@@ -243,6 +308,9 @@ def _event_payload(
         "file_path": file_path,
         "file_size": int(file_size),
         "checksum": checksum,
+        "surface_file_path": surface_file_path,
+        "surface_file_size": int(surface_file_size) if surface_file_size is not None else None,
+        "surface_checksum": surface_checksum,
         "source": "era5_cds",
         "ingest_time": ingest_time.isoformat(),
     }
@@ -255,7 +323,7 @@ def main() -> None:
     parser.add_argument(
         "--dataset-type",
         default=os.getenv("ERA5_DATASET_TYPE", "surface"),
-        choices=["surface"],
+        choices=["surface", "pressure_levels"],
         help="ERA5 dataset type",
     )
     parser.add_argument(
@@ -292,10 +360,21 @@ def main() -> None:
     cfg = _load_yaml(args.config)
     region = _region_from_cfg(cfg)
 
-    if args.dataset_type != "surface":
-        raise ValueError("Only --dataset-type surface is implemented for TODO_1")
+    if args.dataset_type == "surface":
+        variables = _surface_vars_from_cfg(cfg)
+        surface_variables: list[str] = []
+        pressure_levels: list[str] = []
+        request_times: list[str] = [f"{h:02d}:00" for h in range(24)]
+        cds_dataset = "reanalysis-era5-single-levels"
+        file_extension = "nc"
+    else:
+        variables = _pressure_level_vars_from_cfg(cfg)
+        surface_variables = _surface_vars_from_cfg(cfg)
+        pressure_levels = _pressure_levels_from_cfg(cfg)
+        request_times = _pressure_level_times_from_cfg(cfg)
+        cds_dataset = "reanalysis-era5-pressure-levels"
+        file_extension = "grib"
 
-    variables = _surface_vars_from_cfg(cfg)
     raw_base_path = (args.output_base_path or _raw_base_path_from_cfg(cfg)).rstrip("/")
 
     start_d = _parse_date(args.start_date)
@@ -324,32 +403,68 @@ def main() -> None:
     for year, month in months:
         hdfs_path = (
             f"{raw_base_path}/{args.dataset_type}/year={year}/month={month:02d}/"
-            f"era5_{args.dataset_type}_{year}{month:02d}.nc"
+            f"era5_{args.dataset_type}_{year}{month:02d}.{file_extension}"
+        )
+        surface_hdfs_path = (
+            f"{raw_base_path}/{args.dataset_type}_surface_grib/year={year}/month={month:02d}/"
+            f"era5_{args.dataset_type}_surface_{year}{month:02d}.grib"
+            if args.dataset_type == "pressure_levels"
+            else None
         )
 
-        if skip_existing and _hdfs_path_exists(hdfs_path):
+        if skip_existing and _hdfs_path_exists(hdfs_path) and (
+            surface_hdfs_path is None or _hdfs_path_exists(surface_hdfs_path)
+        ):
             logger.info(f"Skip existing HDFS file: {hdfs_path}")
             continue
 
         logger.info(f"Downloading ERA5 {args.dataset_type} {year}-{month:02d} -> {hdfs_path}")
 
-        request = _build_surface_request(
-            variables=variables,
-            region=region,
-            year=year,
-            month=month,
-            start_date=start_d,
-            end_date=end_d,
-        )
+        if args.dataset_type == "surface":
+            request = _build_surface_request(
+                variables=variables,
+                region=region,
+                year=year,
+                month=month,
+                start_date=start_d,
+                end_date=end_d,
+            )
+            surface_request = None
+        else:
+            request = _build_pressure_levels_request(
+                variables=variables,
+                pressure_levels=pressure_levels,
+                times=request_times,
+                region=region,
+                year=year,
+                month=month,
+                start_date=start_d,
+                end_date=end_d,
+            )
+            surface_request = _build_surface_request(
+                variables=surface_variables,
+                region=region,
+                year=year,
+                month=month,
+                start_date=start_d,
+                end_date=end_d,
+                times=request_times,
+                output_format="grib",
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            local_path = Path(tmpdir) / f"era5_{args.dataset_type}_{year}{month:02d}.nc"
+            local_path = Path(tmpdir) / f"era5_{args.dataset_type}_{year}{month:02d}.{file_extension}"
+            surface_local_path = (
+                Path(tmpdir) / f"era5_{args.dataset_type}_surface_{year}{month:02d}.grib"
+                if surface_request is not None
+                else None
+            )
 
             # Retry download.
             max_retries = int(os.getenv("ERA5_DOWNLOAD_MAX_RETRIES", "3"))
             for attempt in range(1, max_retries + 1):
                 try:
-                    client.retrieve("reanalysis-era5-single-levels", request, str(local_path))
+                    client.retrieve(cds_dataset, request, str(local_path))
                     break
                 except Exception as exc:
                     if attempt >= max_retries:
@@ -365,14 +480,52 @@ def main() -> None:
 
             _hdfs_put(local_path, hdfs_path)
 
+            surface_size = None
+            surface_checksum = None
+            if surface_request is not None and surface_local_path is not None and surface_hdfs_path is not None:
+                logger.info(f"Downloading ERA5 pressure-level surface GRIB {year}-{month:02d} -> {surface_hdfs_path}")
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        client.retrieve("reanalysis-era5-single-levels", surface_request, str(surface_local_path))
+                        break
+                    except Exception as exc:
+                        if attempt >= max_retries:
+                            raise
+                        delay = 10 * attempt
+                        logger.warning(
+                            f"Surface GRIB download failed attempt {attempt}/{max_retries}: {exc}; sleep {delay}s"
+                        )
+                        import time
+
+                        time.sleep(delay)
+                surface_size = surface_local_path.stat().st_size
+                surface_checksum = _sha256_of_file(surface_local_path)
+                _hdfs_put(surface_local_path, surface_hdfs_path)
+
         # Compute time range for the event.
         month_first = date(year, month, 1)
         month_last = _next_month(month_first) - timedelta(days=1)
         req_start = max(start_d, month_first)
         req_end = min(end_d, month_last)
 
-        start_time = datetime(req_start.year, req_start.month, req_start.day, 0, 0, tzinfo=timezone.utc)
-        end_time = datetime(req_end.year, req_end.month, req_end.day, 23, 0, tzinfo=timezone.utc)
+        start_hour, start_minute = _parse_hhmm(request_times[0])
+        end_hour, end_minute = _parse_hhmm(request_times[-1])
+        start_time = datetime(
+            req_start.year,
+            req_start.month,
+            req_start.day,
+            start_hour,
+            start_minute,
+            tzinfo=timezone.utc,
+        )
+        end_time = datetime(
+            req_end.year,
+            req_end.month,
+            req_end.day,
+            end_hour,
+            end_minute,
+            tzinfo=timezone.utc,
+        )
 
         event = _event_payload(
             dataset_type=args.dataset_type,
@@ -384,6 +537,9 @@ def main() -> None:
             file_path=hdfs_path,
             file_size=size,
             checksum=checksum,
+            surface_file_path=surface_hdfs_path,
+            surface_file_size=surface_size,
+            surface_checksum=surface_checksum,
         )
 
         ok = send_event(producer, args.topic, event, logger, key_field="event_id", wait_for_ack=True)

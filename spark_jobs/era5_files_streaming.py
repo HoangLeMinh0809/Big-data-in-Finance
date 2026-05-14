@@ -62,6 +62,9 @@ ERA5_SCHEMA = StructType(
         StructField("file_path", StringType(), True),
         StructField("file_size", LongType(), True),
         StructField("checksum", StringType(), True),
+        StructField("surface_file_path", StringType(), True),
+        StructField("surface_file_size", LongType(), True),
+        StructField("surface_checksum", StringType(), True),
         StructField("source", StringType(), True),
         StructField("ingest_time", StringType(), True),
     ]
@@ -107,6 +110,24 @@ def main() -> None:
         .withColumn("ingest_time", to_timestamp(col("ingest_time")))
         .withColumn("spark_processed_at", current_timestamp().cast(TimestampType()))
         .dropDuplicates(["event_id"])
+        .select(
+            "event_id",
+            "dataset_type",
+            "year",
+            "month",
+            "start_time",
+            "end_time",
+            "bbox",
+            "file_path",
+            "file_size",
+            "checksum",
+            "source",
+            "ingest_time",
+            "spark_processed_at",
+            "surface_file_path",
+            "surface_file_size",
+            "surface_checksum",
+        )
     )
 
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")

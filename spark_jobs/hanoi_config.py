@@ -69,6 +69,14 @@ TABLES = {
     "master_gold": f"{ICEBERG_CATALOG}.features.hanoi_pm25_master_hourly_gold",
     "training_gold": f"{ICEBERG_CATALOG}.features.hanoi_pm25_training_dataset_gold",
     "model_runs_gold": f"{ICEBERG_CATALOG}.models.hanoi_pm25_model_runs_gold",
+    "era5_arl_bronze": f"{ICEBERG_CATALOG}.weather.era5_arl_files_bronze",
+    "hysplit_runs_bronze": f"{ICEBERG_CATALOG}.trajectory.hysplit_runs_bronze",
+    "hysplit_traj_silver": f"{ICEBERG_CATALOG}.trajectory.hysplit_trajectories_silver",
+    "hysplit_cluster_silver": f"{ICEBERG_CATALOG}.trajectory.hysplit_trajectories_clustered_silver",
+    "openaq_gradient_silver": f"{ICEBERG_CATALOG}.features.openaq_spatial_gradient_silver",
+    "s5p_grid_silver": f"{ICEBERG_CATALOG}.satellite.sentinel5p_grid_silver",
+    "trajectory_path_silver": f"{ICEBERG_CATALOG}.features.trajectory_path_satellite_silver",
+    "trajectory_hourly_silver": f"{ICEBERG_CATALOG}.features.trajectory_hourly_features_silver",
 }
 
 
@@ -186,6 +194,26 @@ def get_gold_lag_hours() -> list[int]:
 
 def get_gold_rolling_hours() -> list[int]:
     return [int(v) for v in load_config()["gold"]["rolling_hours"]]
+
+
+def get_hysplit_config() -> dict[str, Any]:
+    return deepcopy(load_config().get("hysplit", {}))
+
+
+def get_trajectory_config() -> dict[str, Any]:
+    return deepcopy(load_config().get("trajectory", {}))
+
+
+def get_sampling_config() -> dict[str, Any]:
+    return deepcopy(load_config().get("sampling", {}))
+
+
+def get_era5_pressure_levels() -> list[int]:
+    return [int(v) for v in load_config()["era5"].get("pressure_levels", [])]
+
+
+def get_era5_pressure_level_variables() -> list[str]:
+    return [str(v) for v in load_config()["era5"].get("pressure_level_variables", [])]
 
 
 def get_table_names() -> dict[str, str]:

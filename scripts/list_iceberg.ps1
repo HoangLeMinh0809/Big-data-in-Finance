@@ -24,7 +24,7 @@ param(
     [switch]$UseDocker,
     [string]$DockerService = "spark-master",
     [string]$DockerSparkSqlPath = "/opt/spark/bin/spark-sql",
-    [string]$SparkPackages = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2"
+    [string]$SparkPackages = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
 )
 
 $script:ComposeCmd = $null
@@ -53,34 +53,35 @@ function Invoke-Compose {
     return $LASTEXITCODE
 }
 
-function Run-SparkSql {
+function Invoke-SparkSql {
     param([string]$Query)
 
+    $derbyHome = "/tmp/spark-sql-metastore-$([guid]::NewGuid().ToString('N'))"
     $confArgs = @(
+        "--conf", "spark.sql.catalogImplementation=in-memory",
+        "--conf", "spark.driver.extraJavaOptions=-Dderby.system.home=$derbyHome",
         "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
         "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG=org.apache.iceberg.spark.SparkCatalog",
         "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.type=hadoop",
         "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.warehouse=$env:ICEBERG_WAREHOUSE"
     )
 
-    $args = $confArgs + @("-e", $Query)
+    $sparkSqlArgs = $confArgs + @("-e", $Query)
 
     $spark = Get-Command spark-sql -ErrorAction SilentlyContinue
-    if ($spark -and -not $UseDocker) {
-        & spark-sql @args
+    if ($spark -and -not $UseDocker -and -not $script:ComposeCmd) {
+        & spark-sql @sparkSqlArgs
         return $LASTEXITCODE
     }
 
-    if (-not $spark -and -not $UseDocker) {
-        Write-Warning "spark-sql not found in PATH; falling back to Docker Compose."
+    if (-not $UseDocker) {
+        if ($script:ComposeCmd) {
+            Write-Warning "Using Docker Compose Spark SQL to avoid local Spark/Python dependency drift."
+        } elseif (-not $spark) {
+            Write-Warning "spark-sql not found in PATH; falling back to Docker Compose."
+        }
     }
 
-    $confArgs = @(
-        "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG=org.apache.iceberg.spark.SparkCatalog",
-        "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.type=hadoop",
-        "--conf", "spark.sql.catalog.$env:ICEBERG_CATALOG.warehouse=$env:ICEBERG_WAREHOUSE"
-    )
     $packageArgs = @()
     if ($SparkPackages) {
         $packageArgs = @("--packages", $SparkPackages)
@@ -100,33 +101,33 @@ Write-Host "Using Iceberg warehouse: $env:ICEBERG_WAREHOUSE" -ForegroundColor Cy
 if ($DescribeAll) {
     if (-not $Table) { Write-Error "-DescribeAll requires -Table <catalog.namespace.table>"; exit 3 }
     Write-Host "Describing table $Table..." -ForegroundColor Green
-    Run-SparkSql "DESCRIBE TABLE $Table;"
+    Invoke-SparkSql "DESCRIBE TABLE $Table;"
     if ($Count) {
         Write-Host "Counting rows in $Table..." -ForegroundColor Green
-        Run-SparkSql "SELECT COUNT(*) FROM $Table;"
+        Invoke-SparkSql "SELECT COUNT(*) FROM $Table;"
     }
     Write-Host "Selecting sample rows from $Table..." -ForegroundColor Green
-    Run-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
+    Invoke-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
     exit 0
 }
 
 Write-Host "Showing namespaces in catalog $env:ICEBERG_CATALOG..." -ForegroundColor Green
-Run-SparkSql "SHOW NAMESPACES IN $env:ICEBERG_CATALOG;"
+Invoke-SparkSql "SHOW NAMESPACES IN $env:ICEBERG_CATALOG;"
 
 if ($Namespace) {
     Write-Host "Showing tables in $env:ICEBERG_CATALOG.$Namespace..." -ForegroundColor Green
-    Run-SparkSql "SHOW TABLES IN $env:ICEBERG_CATALOG.$Namespace;"
+    Invoke-SparkSql "SHOW TABLES IN $env:ICEBERG_CATALOG.$Namespace;"
 }
 
 if ($Table) {
     Write-Host "Describing table $Table..." -ForegroundColor Green
-    Run-SparkSql "DESCRIBE TABLE $Table;"
+    Invoke-SparkSql "DESCRIBE TABLE $Table;"
     if ($Count) {
         Write-Host "Counting rows in $Table..." -ForegroundColor Green
-        Run-SparkSql "SELECT COUNT(*) FROM $Table;"
+        Invoke-SparkSql "SELECT COUNT(*) FROM $Table;"
     }
     Write-Host "Selecting sample rows from $Table..." -ForegroundColor Green
-    Run-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
+    Invoke-SparkSql "SELECT * FROM $Table LIMIT $Sample;"
 }
 
 Write-Host "Done." -ForegroundColor Cyan
