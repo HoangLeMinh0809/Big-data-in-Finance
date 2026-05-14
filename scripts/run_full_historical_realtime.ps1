@@ -143,29 +143,19 @@ if ($enableEra5) {
     try {
         foreach ($era5DatasetType in $era5DatasetTypes) {
             Write-Host "=== [4/9] ERA5 dataset: $era5DatasetType ==="
-            $env:ERA5_START_DATE = $era5StartDate
-            $env:ERA5_END_DATE = $era5EndDate
-            $env:ERA5_DATASET_TYPE = $era5DatasetType
-            $env:KAFKA_TOPIC = "era5-files"
-            bash scripts/submit_spark.sh era5-ingest | Out-Host
+            bash -lc "ERA5_START_DATE='$era5StartDate' ERA5_END_DATE='$era5EndDate' ERA5_DATASET_TYPE='$era5DatasetType' KAFKA_TOPIC='era5-files' bash scripts/submit_spark.sh era5-ingest" | Out-Host
 
-            $env:STOP_AFTER_BATCH = "true"
-            $env:KAFKA_STARTING_OFFSETS = "earliest"
-            bash scripts/submit_spark.sh era5-files | Out-Host
+            bash -lc "STOP_AFTER_BATCH=true KAFKA_STARTING_OFFSETS=earliest KAFKA_TOPIC='era5-files' bash scripts/submit_spark.sh era5-files" | Out-Host
 
             if ($era5DatasetType -eq "surface") {
                 Write-Host "=== [4/9] ERA5 surface -> Hanoi silver ==="
-                $env:START_DATE = $era5StartDate
-                $env:END_DATE = $era5EndDate
-                $env:FULL_REFRESH = if ($env:FULL_REFRESH) { $env:FULL_REFRESH } else { "0" }
-                bash scripts/submit_spark.sh era5-surface-hanoi-silver | Out-Host
+                $fullRefresh = if ($env:FULL_REFRESH) { $env:FULL_REFRESH } else { "0" }
+                bash -lc "START_DATE='$era5StartDate' END_DATE='$era5EndDate' FULL_REFRESH='$fullRefresh' bash scripts/submit_spark.sh era5-surface-hanoi-silver" | Out-Host
             }
             elseif ($era5DatasetType -eq "pressure_levels") {
                 Write-Host "=== [4/9] ERA5 pressure-level -> HYSPLIT ARL ==="
-                $env:START_DATE = $era5StartDate
-                $env:END_DATE = $era5EndDate
-                $env:FULL_REFRESH = if ($env:FULL_REFRESH) { $env:FULL_REFRESH } else { "0" }
-                bash scripts/submit_spark.sh era5-pressure-arl | Out-Host
+                $fullRefresh = if ($env:FULL_REFRESH) { $env:FULL_REFRESH } else { "0" }
+                bash -lc "START_DATE='$era5StartDate' END_DATE='$era5EndDate' FULL_REFRESH='$fullRefresh' bash scripts/submit_spark.sh era5-pressure-arl" | Out-Host
             }
             else {
                 Write-Host "[INFO] Skip ERA5 post-processing for ERA5_DATASET_TYPE=$era5DatasetType"
