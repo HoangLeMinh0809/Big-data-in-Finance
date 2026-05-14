@@ -11,6 +11,7 @@
 #   KAFKA_STARTING_OFFSETS=earliest bash scripts/submit_spark.sh sentinel5p
 #   bash scripts/submit_spark.sh era5-ingest   # download ERA5 + publish metadata to Kafka
 #   bash scripts/submit_spark.sh era5-files    # Spark consumer: Kafka era5-files -> Iceberg
+#   bash scripts/submit_spark.sh era5-pressure-arl  # Convert ERA5 pressure-level NetCDF -> HYSPLIT ARL
 # =============================================================================
 
 set -euo pipefail
@@ -244,6 +245,17 @@ case "$JOB_TYPE" in
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/era5_surface_hanoi_silver/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
+  era5-pressure-arl)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="ERA5PressureLevelsToARL"
+    JOB_FILE="/opt/spark-jobs/era5_pressure_levels_to_arl.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/raw/era5/arl/pressure_levels"
+    HDFS_CHECKPOINT_DIR="/checkpoints/era5_pressure_arl"
+    ICEBERG_TABLE="ais.weather.era5_arl_files_bronze"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/era5_pressure_arl/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
   sentinel5p-hanoi-silver)
     JOB_TYPE_KIND="spark"
     APP_NAME="Sentinel5PHanoiSilver"
@@ -347,13 +359,13 @@ case "$JOB_TYPE" in
     PACKAGES="${CASSANDRA_PACKAGES}"
     ;;
   *)
-    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
     ;;
 esac
 
 case "$JOB_TYPE" in
-  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
+  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
     if [ -n "$START_DATE" ]; then
       JOB_ARGS+=("--start-date" "$START_DATE")
     fi
@@ -437,6 +449,9 @@ DOCKER_EXEC_ARGS+=("-e" "S5P_CO_QA_THRESHOLD=${S5P_CO_QA_THRESHOLD:-}")
 DOCKER_EXEC_ARGS+=("-e" "S5P_SO2_QA_THRESHOLD=${S5P_SO2_QA_THRESHOLD:-}")
 DOCKER_EXEC_ARGS+=("-e" "S5P_O3_QA_THRESHOLD=${S5P_O3_QA_THRESHOLD:-}")
 DOCKER_EXEC_ARGS+=("-e" "S5P_AER_AI_QA_THRESHOLD=${S5P_AER_AI_QA_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "ERA5_ARL_OUTPUT_BASE_PATH=${ERA5_ARL_OUTPUT_BASE_PATH:-}")
+DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_ERA5_2ARL_BIN=${HYSPLIT_ERA5_2ARL_BIN:-}")
+DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_ERA5_2ARL_TEMPLATE=${HYSPLIT_ERA5_2ARL_TEMPLATE:-}")
 
 SPARK_EXTRA_CONF=()
 if [ -n "$SPARK_CORES_MAX" ]; then

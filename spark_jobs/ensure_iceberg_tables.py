@@ -234,13 +234,25 @@ def ensure_tables(spark: SparkSession) -> None:
             checksum STRING,
             source STRING,
             ingest_time TIMESTAMP,
-            spark_processed_at TIMESTAMP
+            spark_processed_at TIMESTAMP,
+            surface_file_path STRING,
+            surface_file_size BIGINT,
+            surface_checksum STRING
         )
         USING ICEBERG
         PARTITIONED BY (dataset_type, year, month)
         TBLPROPERTIES ('format-version'='2')
         """
     )
+    for column_name, column_type in [
+        ("surface_file_path", "STRING"),
+        ("surface_file_size", "BIGINT"),
+        ("surface_checksum", "STRING"),
+    ]:
+        try:
+            spark.sql(f"ALTER TABLE {TABLES['era5_files_bronze']} ADD COLUMN {column_name} {column_type}")
+        except Exception:
+            pass
 
     spark.sql(
         f"""

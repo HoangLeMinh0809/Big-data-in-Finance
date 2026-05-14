@@ -9,6 +9,13 @@ $realtimeLookbackMinutes = if ($env:REALTIME_LOOKBACK_MINUTES) { [int]$env:REALT
 $realtimePollSeconds = if ($env:REALTIME_POLL_SECONDS) { [int]$env:REALTIME_POLL_SECONDS } else { 600 }
 $enableAirflow = if ($env:ENABLE_AIRFLOW) { $env:ENABLE_AIRFLOW.ToLower() -eq "true" } else { $false }
 $enableMonitoring = if ($env:ENABLE_MONITORING) { $env:ENABLE_MONITORING.ToLower() -eq "true" } else { $false }
+$enableEra5 = if ($env:ENABLE_ERA5) { $env:ENABLE_ERA5.ToLower() -eq "true" } else { $true }
+$era5DatasetTypesRaw = if ($env:ERA5_DATASET_TYPES) { $env:ERA5_DATASET_TYPES } elseif ($env:ERA5_DATASET_TYPE) { $env:ERA5_DATASET_TYPE } else { "surface,pressure_levels" }
+$era5DatasetTypes = $era5DatasetTypesRaw -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+$defaultEra5EndDate = (Get-Date).ToUniversalTime().Date.ToString("yyyy-MM-dd")
+$defaultEra5StartDate = (Get-Date).ToUniversalTime().Date.AddDays(-$lookbackDays).ToString("yyyy-MM-dd")
+$era5StartDate = if ($env:ERA5_START_DATE) { $env:ERA5_START_DATE } else { $defaultEra5StartDate }
+$era5EndDate = if ($env:ERA5_END_DATE) { $env:ERA5_END_DATE } else { $defaultEra5EndDate }
 
 function Show-ContainerDiagnostics {
     param(
@@ -100,7 +107,7 @@ Wait-ForHealthy -ContainerName "namenode" -TimeoutSec 300
 Wait-ForHealthy -ContainerName "spark-master" -TimeoutSec 300
 
 Write-Host "=== [2/7] Create Kafka topics ==="
-Ensure-Topics
+Initialize-Topics
 
 Write-Host "=== [3/8] Ensure Iceberg catalog/tables ==="
 docker exec spark-master /opt/spark/bin/spark-submit `
@@ -115,21 +122,88 @@ docker exec spark-master /opt/spark/bin/spark-submit `
     --conf "spark.sql.catalog.ais.warehouse=hdfs://namenode:9000/warehouse/iceberg" `
     /opt/spark-jobs/ensure_iceberg_tables.py | Out-Host
 
-Write-Host "=== [4/8] Start Spark streaming sinks (detached) ==="
+if ($enableEra5) {
+    Write-Host "=== [4/9] Historical backfill: ERA5 metadata ==="
+
+    if (-not $era5StartDate -or -not $era5EndDate) {
+        throw "ENABLE_ERA5=true requires ERA5_START_DATE and ERA5_END_DATE"
+    }
+
+    $prevEra5StartDate = $env:ERA5_START_DATE
+    $prevEra5EndDate = $env:ERA5_END_DATE
+    $prevEra5DatasetType = $env:ERA5_DATASET_TYPE
+    $prevEra5DatasetTypes = $env:ERA5_DATASET_TYPES
+    $prevKafkaTopic = $env:KAFKA_TOPIC
+    $prevStopAfterBatch = $env:STOP_AFTER_BATCH
+    $prevKafkaStartingOffsets = $env:KAFKA_STARTING_OFFSETS
+    $prevStartDate = $env:START_DATE
+    $prevEndDate = $env:END_DATE
+    $prevFullRefresh = $env:FULL_REFRESH
+
+    try {
+        foreach ($era5DatasetType in $era5DatasetTypes) {
+            Write-Host "=== [4/9] ERA5 dataset: $era5DatasetType ==="
+            $env:ERA5_START_DATE = $era5StartDate
+            $env:ERA5_END_DATE = $era5EndDate
+            $env:ERA5_DATASET_TYPE = $era5DatasetType
+            $env:KAFKA_TOPIC = "era5-files"
+            bash scripts/submit_spark.sh era5-ingest | Out-Host
+
+            $env:STOP_AFTER_BATCH = "true"
+            $env:KAFKA_STARTING_OFFSETS = "earliest"
+            bash scripts/submit_spark.sh era5-files | Out-Host
+
+            if ($era5DatasetType -eq "surface") {
+                Write-Host "=== [4/9] ERA5 surface -> Hanoi silver ==="
+                $env:START_DATE = $era5StartDate
+                $env:END_DATE = $era5EndDate
+                $env:FULL_REFRESH = if ($env:FULL_REFRESH) { $env:FULL_REFRESH } else { "0" }
+                bash scripts/submit_spark.sh era5-surface-hanoi-silver | Out-Host
+            }
+            elseif ($era5DatasetType -eq "pressure_levels") {
+                Write-Host "=== [4/9] ERA5 pressure-level -> HYSPLIT ARL ==="
+                $env:START_DATE = $era5StartDate
+                $env:END_DATE = $era5EndDate
+                $env:FULL_REFRESH = if ($env:FULL_REFRESH) { $env:FULL_REFRESH } else { "0" }
+                bash scripts/submit_spark.sh era5-pressure-arl | Out-Host
+            }
+            else {
+                Write-Host "[INFO] Skip ERA5 post-processing for ERA5_DATASET_TYPE=$era5DatasetType"
+            }
+        }
+    }
+    finally {
+        $env:ERA5_START_DATE = $prevEra5StartDate
+        $env:ERA5_END_DATE = $prevEra5EndDate
+        $env:ERA5_DATASET_TYPE = $prevEra5DatasetType
+        $env:ERA5_DATASET_TYPES = $prevEra5DatasetTypes
+        $env:KAFKA_TOPIC = $prevKafkaTopic
+        $env:STOP_AFTER_BATCH = $prevStopAfterBatch
+        $env:KAFKA_STARTING_OFFSETS = $prevKafkaStartingOffsets
+        $env:START_DATE = $prevStartDate
+        $env:END_DATE = $prevEndDate
+        $env:FULL_REFRESH = $prevFullRefresh
+    }
+}
+else {
+    Write-Host "=== [4/9] Skip ERA5 (ENABLE_ERA5=false) ==="
+}
+
+Write-Host "=== [5/9] Start Spark streaming sinks (detached) ==="
 Submit-SparkJobDetached -AppName "WeatherHistory_Streaming" -JobFile "/opt/spark-jobs/weather_streaming.py" -HdfsDataDir "/warehouse/iceberg/weather/weather_history_bronze" -HdfsCheckpointDir "/checkpoints/weather_history"
 Submit-SparkJobDetached -AppName "OpenAQHourly_Streaming" -JobFile "/opt/spark-jobs/openaq_hourly_streaming.py" -HdfsDataDir "/warehouse/iceberg/air_quality/openaq_hourly_bronze" -HdfsCheckpointDir "/checkpoints/openaq_hourly"
 Submit-SparkJobDetached -AppName "Sentinel5PSummary_Streaming" -JobFile "/opt/spark-jobs/sentinel5p_summary_streaming.py" -HdfsDataDir "/warehouse/iceberg/satellite/sentinel5p_summary_bronze" -HdfsCheckpointDir "/checkpoints/sentinel5p_summary"
 Submit-SparkJobDetached -AppName "MAIACSummary_Streaming" -JobFile "/opt/spark-jobs/maiac_summary_streaming.py" -HdfsDataDir "/warehouse/iceberg/satellite/maiac_summary_bronze" -HdfsCheckpointDir "/checkpoints/maiac_summary"
 
-Write-Host "=== [5/8] Historical backfill: Weather (last $lookbackDays days) ==="
+Write-Host "=== [6/9] Historical backfill: Weather (last $lookbackDays days) ==="
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" ingest | Out-Host
 
-Write-Host "=== [6/8] Historical backfill: OpenAQ, Sentinel-5P, MAIAC ==="
+Write-Host "=== [7/9] Historical backfill: OpenAQ, Sentinel-5P, MAIAC ==="
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" openaq-ingest | Out-Host
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" sentinel5p-ingest | Out-Host
 docker compose run --rm -e WINDOW_MODE=batch -e BATCH_LOOKBACK_DAYS="$lookbackDays" maiac-ingest | Out-Host
 
-Write-Host "=== [7/8] Start realtime loops for Weather + OpenAQ ==="
+Write-Host "=== [8/9] Start realtime loops for Weather + OpenAQ ==="
 $prevWeatherWindowMode = $env:WEATHER_WINDOW_MODE
 $prevWeatherRealtimeContinuous = $env:WEATHER_REALTIME_CONTINUOUS
 $prevWeatherRealtimeLookback = $env:WEATHER_REALTIME_LOOKBACK_MINUTES
@@ -162,7 +236,7 @@ finally {
     $env:OPENAQ_REALTIME_POLL_SECONDS = $prevOpenaqRealtimePoll
 }
 
-Write-Host "=== [8/8] Optional services (Monitoring/Airflow) ==="
+Write-Host "=== [9/9] Optional services (Monitoring/Airflow) ==="
 if ($enableMonitoring) {
     try {
         docker compose up -d monitoring-ui | Out-Host
@@ -197,6 +271,10 @@ Write-Host "  bash scripts/check_pipeline.sh weather"
 Write-Host "  bash scripts/check_pipeline.sh openaq"
 Write-Host "  bash scripts/check_pipeline.sh sentinel5p"
 Write-Host "  bash scripts/check_pipeline.sh maiac"
+if ($enableEra5) {
+    Write-Host "  docker exec namenode hdfs dfs -ls -R /warehouse/iceberg/weather/era5_surface_hanoi_hourly_silver"
+    Write-Host "  docker exec namenode hdfs dfs -ls -R /raw/era5/arl/pressure_levels"
+}
 Write-Host ""
 Write-Host "UIs:"
 Write-Host "  NameNode:  http://localhost:9870"

@@ -23,11 +23,11 @@ BOOTSTRAP_STARTING_OFFSETS="${BOOTSTRAP_STARTING_OFFSETS:-earliest}"
 ENABLE_AIRFLOW="${ENABLE_AIRFLOW:-false}"
 ENABLE_MONITORING="${ENABLE_MONITORING:-false}"
 
-# ERA5 (optional in this bootstrap)
-ENABLE_ERA5="${ENABLE_ERA5:-false}"
-ERA5_DATASET_TYPE="${ERA5_DATASET_TYPE:-surface}"
-ERA5_START_DATE="${ERA5_START_DATE:-}"
-ERA5_END_DATE="${ERA5_END_DATE:-}"
+# ERA5 runs both surface features and pressure-level inputs for HYSPLIT by default.
+ENABLE_ERA5="${ENABLE_ERA5:-true}"
+ERA5_DATASET_TYPES="${ERA5_DATASET_TYPES:-${ERA5_DATASET_TYPE:-surface,pressure_levels}}"
+ERA5_START_DATE="${ERA5_START_DATE:-$(date -u -d "${LOOKBACK_DAYS} days ago" +%F)}"
+ERA5_END_DATE="${ERA5_END_DATE:-$(date -u +%F)}"
 
 unset STOP_AFTER_BATCH || true
 
@@ -366,16 +366,36 @@ if [ "$ENABLE_ERA5" = "true" ]; then
   ensure_exclusive_stream_resources "ERA5Files_Streaming"
   ensure_spark_app_active "ERA5Files_Streaming" "era5-files" "$BOOTSTRAP_STARTING_OFFSETS"
 
-  # Run ingest (downloads NetCDF -> HDFS raw + sends Kafka events)
-  ERA5_START_DATE="$ERA5_START_DATE" \
-  ERA5_END_DATE="$ERA5_END_DATE" \
-  ERA5_DATASET_TYPE="$ERA5_DATASET_TYPE" \
-    bash scripts/submit_spark.sh era5-ingest
+  IFS=',' read -r -a era5_dataset_types <<< "$ERA5_DATASET_TYPES"
+  for era5_dataset_type in "${era5_dataset_types[@]}"; do
+    era5_dataset_type="$(echo "$era5_dataset_type" | xargs)"
+    [ -n "$era5_dataset_type" ] || continue
 
-  # One-shot metadata sink flush
-  STOP_AFTER_BATCH=true \
-  KAFKA_STARTING_OFFSETS=earliest \
-    bash scripts/submit_spark.sh era5-files
+    echo "=== [5/9] ERA5 dataset: ${era5_dataset_type} ==="
+
+    # Run ingest (downloads NetCDF -> HDFS raw + sends Kafka events)
+    ERA5_START_DATE="$ERA5_START_DATE" \
+    ERA5_END_DATE="$ERA5_END_DATE" \
+    ERA5_DATASET_TYPE="$era5_dataset_type" \
+      bash scripts/submit_spark.sh era5-ingest
+
+    # One-shot metadata sink flush
+    STOP_AFTER_BATCH=true \
+    KAFKA_STARTING_OFFSETS=earliest \
+      bash scripts/submit_spark.sh era5-files
+
+    if [ "$era5_dataset_type" = "pressure_levels" ]; then
+      START_DATE="$ERA5_START_DATE" \
+      END_DATE="$ERA5_END_DATE" \
+        bash scripts/submit_spark.sh era5-pressure-arl
+    elif [ "$era5_dataset_type" = "surface" ]; then
+      START_DATE="$ERA5_START_DATE" \
+      END_DATE="$ERA5_END_DATE" \
+        bash scripts/submit_spark.sh era5-surface-hanoi-silver
+    else
+      echo "[INFO] Skip ERA5 post-processing for ERA5_DATASET_TYPE=${era5_dataset_type}"
+    fi
+  done
 
   kill_spark_app_by_name "ERA5Files_Streaming"
 

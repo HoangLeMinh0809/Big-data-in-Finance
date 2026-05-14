@@ -9,6 +9,8 @@ datanode_data/
 # Spark
 checkpoints/*
 !checkpoints/.gitkeep
+spark/hysplit/*
+!spark/hysplit/.gitkeep
 spark-warehouse/
 metastore_db/
 derby.log
