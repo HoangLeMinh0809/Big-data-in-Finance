@@ -44,8 +44,12 @@ RUN set -eux; \
 
 ENV ECCODES_DEFINITION_PATH=/usr/share/eccodes/definitions
 
+ARG INSTALL_XGBOOST=true
+ARG PIP_DEFAULT_TIMEOUT=300
+ARG PIP_RETRIES=10
+
 RUN rm -rf /root/.cache/pip && \
-    python3 -m pip install --no-cache-dir --only-binary=:all: \
+    python3 -m pip install --no-cache-dir --default-timeout="${PIP_DEFAULT_TIMEOUT}" --retries="${PIP_RETRIES}" --only-binary=:all: \
     pyyaml==6.0.1 \
     xarray==2023.1.0 \
     netCDF4==1.6.5 \
@@ -58,9 +62,14 @@ RUN rm -rf /root/.cache/pip && \
     shapely==2.0.2 \
     numpy==1.24.4 \
     pandas==1.5.3 \
+    pyarrow==12.0.1 \
     scikit-learn==1.3.2 \
     lightgbm==3.3.5 && \
-    python3 -m pip install --no-cache-dir --only-binary=:all: \
-    xgboost==2.0.3
+    if [ "${INSTALL_XGBOOST}" = "true" ]; then \
+      python3 -m pip install --no-cache-dir --default-timeout="${PIP_DEFAULT_TIMEOUT}" --retries="${PIP_RETRIES}" --only-binary=:all: \
+      xgboost==2.0.3; \
+    else \
+      echo "Skipping optional xgboost install."; \
+    fi
 
 USER root

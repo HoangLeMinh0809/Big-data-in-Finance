@@ -267,6 +267,28 @@ case "$JOB_TYPE" in
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/sentinel5p_hanoi_silver/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
+  openaq-gradient)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="OpenAQSpatialGradientSilver"
+    JOB_FILE="/opt/spark-jobs/openaq_spatial_gradient_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/features/openaq_spatial_gradient_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/openaq_spatial_gradient_silver"
+    ICEBERG_TABLE="ais.features.openaq_spatial_gradient_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/openaq_spatial_gradient_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  s5p-grid-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="Sentinel5PGridSilver"
+    JOB_FILE="/opt/spark-jobs/sentinel5p_grid_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/satellite/sentinel5p_grid_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/sentinel5p_grid_silver"
+    ICEBERG_TABLE="ais.satellite.sentinel5p_grid_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/sentinel5p_grid_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
   maiac-hanoi-silver)
     JOB_TYPE_KIND="spark"
     APP_NAME="MAIACHanoiSilver"
@@ -359,13 +381,13 @@ case "$JOB_TYPE" in
     PACKAGES="${CASSANDRA_PACKAGES}"
     ;;
   *)
-    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
     ;;
 esac
 
 case "$JOB_TYPE" in
-  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
+  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
     if [ -n "$START_DATE" ]; then
       JOB_ARGS+=("--start-date" "$START_DATE")
     fi
