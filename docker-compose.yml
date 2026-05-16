@@ -115,6 +115,10 @@ services:
     build:
       context: ./spark
       dockerfile: Dockerfile
+      args:
+        INSTALL_XGBOOST: ${INSTALL_XGBOOST:-true}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-300}
+        PIP_RETRIES: ${PIP_RETRIES:-10}
     image: ais-spark:3.5.3
     pull_policy: never
     container_name: spark-master
@@ -145,6 +149,10 @@ services:
     build:
       context: ./spark
       dockerfile: Dockerfile
+      args:
+        INSTALL_XGBOOST: ${INSTALL_XGBOOST:-true}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-300}
+        PIP_RETRIES: ${PIP_RETRIES:-10}
     image: ais-spark:3.5.3
     pull_policy: never
     container_name: spark-worker

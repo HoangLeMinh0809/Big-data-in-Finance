@@ -25,7 +25,8 @@ export MSYS2_ARG_CONV_EXCL="*"
 if [ -f ".env" ]; then
   set +u  # Temporarily disable strict mode for variable substitution
   set -a
-  source .env
+  # Support .env files edited on Windows with CRLF line endings.
+  source <(tr -d '\r' < .env)
   set +a
   set -u  # Re-enable strict mode
 fi
@@ -307,6 +308,28 @@ case "$JOB_TYPE" in
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/sentinel5p_hanoi_silver/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
+  openaq-gradient)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="OpenAQSpatialGradientSilver"
+    JOB_FILE="/opt/spark-jobs/openaq_spatial_gradient_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/features/openaq_spatial_gradient_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/openaq_spatial_gradient_silver"
+    ICEBERG_TABLE="ais.features.openaq_spatial_gradient_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/openaq_spatial_gradient_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  s5p-grid-silver)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="Sentinel5PGridSilver"
+    JOB_FILE="/opt/spark-jobs/sentinel5p_grid_silver.py"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/satellite/sentinel5p_grid_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/sentinel5p_grid_silver"
+    ICEBERG_TABLE="ais.satellite.sentinel5p_grid_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/sentinel5p_grid_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
   maiac-hanoi-silver)
     JOB_TYPE_KIND="spark"
     APP_NAME="MAIACHanoiSilver"
@@ -399,7 +422,7 @@ case "$JOB_TYPE" in
     PACKAGES="${CASSANDRA_PACKAGES}"
     ;;
   *)
-    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
     ;;
 esac
@@ -409,7 +432,7 @@ if [ -n "$CHECKPOINT_PATH_OVERRIDE" ]; then
 fi
 
 case "$JOB_TYPE" in
-  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
+  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
     if [ -n "$START_DATE" ]; then
       JOB_ARGS+=("--start-date" "$START_DATE")
     fi
@@ -496,6 +519,8 @@ DOCKER_EXEC_ARGS+=("-e" "S5P_AER_AI_QA_THRESHOLD=${S5P_AER_AI_QA_THRESHOLD:-}")
 DOCKER_EXEC_ARGS+=("-e" "ERA5_ARL_OUTPUT_BASE_PATH=${ERA5_ARL_OUTPUT_BASE_PATH:-}")
 DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_ERA5_2ARL_BIN=${HYSPLIT_ERA5_2ARL_BIN:-}")
 DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_ERA5_2ARL_TEMPLATE=${HYSPLIT_ERA5_2ARL_TEMPLATE:-}")
+DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_BIN=${HYSPLIT_BIN:-}")
+DOCKER_EXEC_ARGS+=("-e" "PM25_TRIGGER_THRESHOLD=${PM25_TRIGGER_THRESHOLD:-}")
 DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_BIN=${HYSPLIT_BIN:-/opt/hysplit/exec/hyts_std}")
 DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_OUTPUT_BASE_PATH=${HYSPLIT_OUTPUT_BASE_PATH:-hdfs://namenode:9000/raw/hysplit/trajectories}")
 if [ -n "${DIRECTION:-}" ]; then
