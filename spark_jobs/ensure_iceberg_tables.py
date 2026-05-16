@@ -23,6 +23,13 @@ def create_namespaces(spark: SparkSession) -> None:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.{namespace}")
 
 
+def ensure_columns(spark: SparkSession, table_name: str, columns: dict[str, str]) -> None:
+    existing = set(spark.table(table_name).columns)
+    for column, dtype in columns.items():
+        if column not in existing:
+            spark.sql(f"ALTER TABLE {table_name} ADD COLUMN {column} {dtype}")
+
+
 def ensure_tables(spark: SparkSession) -> None:
     create_namespaces(spark)
 
@@ -550,6 +557,8 @@ def ensure_tables(spark: SparkSession) -> None:
             year INT,
             month INT,
             source_nc STRING,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
             arl_path STRING,
             checksum STRING,
             created_at TIMESTAMP,
@@ -559,6 +568,11 @@ def ensure_tables(spark: SparkSession) -> None:
         PARTITIONED BY (dataset_type, year, month)
         TBLPROPERTIES ('format-version'='2')
         """
+    )
+    ensure_columns(
+        spark,
+        TABLES["era5_arl_bronze"],
+        {"start_time": "TIMESTAMP", "end_time": "TIMESTAMP"},
     )
 
     spark.sql(

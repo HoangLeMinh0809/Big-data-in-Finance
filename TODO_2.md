@@ -276,7 +276,7 @@ Acceptance criteria:
 Mục đích:
 
 - Đọc `era5_files_bronze` lọc `dataset_type=pressure_levels`.
-- Copy NetCDF từ HDFS về local tạm.
+- Xử lý trực tiếp trên HDFS (hoặc HDFS mount trong container chạy job); không copy ra máy local.
 - Gọi `/opt/hysplit/exec/era5_2arl` để tạo ARL.
 - Đẩy ARL lên HDFS.
 - Ghi metadata vào `era5_arl_files_bronze`.

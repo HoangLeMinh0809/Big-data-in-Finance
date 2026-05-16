@@ -18,10 +18,13 @@ from __future__ import annotations
 import os
 
 from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     col,
     current_timestamp,
+    desc_nulls_last,
     from_json,
+    row_number,
     to_timestamp,
 )
 from pyspark.sql.types import (
@@ -71,6 +74,63 @@ ERA5_SCHEMA = StructType(
 )
 
 
+def ensure_table(spark: SparkSession) -> None:
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_TABLE} (
+            event_id STRING,
+            dataset_type STRING,
+            year INT,
+            month INT,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
+            bbox ARRAY<DOUBLE>,
+            file_path STRING,
+            file_size BIGINT,
+            checksum STRING,
+            source STRING,
+            ingest_time TIMESTAMP,
+            spark_processed_at TIMESTAMP,
+            surface_file_path STRING,
+            surface_file_size BIGINT,
+            surface_checksum STRING
+        )
+        USING ICEBERG
+        PARTITIONED BY (dataset_type, year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+
+def upsert_batch(batch_df: DataFrame, batch_id: int) -> None:
+    if batch_df.isEmpty():
+        return
+
+    window = Window.partitionBy("event_id").orderBy(
+        desc_nulls_last("ingest_time"),
+        desc_nulls_last("spark_processed_at"),
+    )
+    updates = (
+        batch_df
+        .where(col("event_id").isNotNull())
+        .withColumn("_rn", row_number().over(window))
+        .where(col("_rn") == 1)
+        .drop("_rn")
+    )
+    updates.createOrReplaceTempView("era5_file_updates")
+    batch_df.sparkSession.sql(
+        f"""
+        MERGE INTO {ICEBERG_TABLE} t
+        USING era5_file_updates s
+        ON t.event_id = s.event_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+        """
+    )
+    print(f"era5_files_batch={{'batch_id': {batch_id}, 'rows': {updates.count()}}}")
+
+
 def main() -> None:
     stop_after_batch, processing_time = parse_streaming_runtime(default_processing_time="30 seconds")
 
@@ -109,7 +169,6 @@ def main() -> None:
         .withColumn("end_time", to_timestamp(col("end_time")))
         .withColumn("ingest_time", to_timestamp(col("ingest_time")))
         .withColumn("spark_processed_at", current_timestamp().cast(TimestampType()))
-        .dropDuplicates(["event_id"])
         .select(
             "event_id",
             "dataset_type",
@@ -130,16 +189,16 @@ def main() -> None:
         )
     )
 
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.weather")
+    ensure_table(spark)
 
     writer = (
-        final_df.writeStream.format("iceberg")
-        .outputMode("append")
+        final_df.writeStream
+        .foreachBatch(upsert_batch)
         .option("checkpointLocation", CHECKPOINT_PATH)
         .queryName("era5_files_to_iceberg")
     )
 
-    query = apply_stream_trigger(writer, stop_after_batch=stop_after_batch, processing_time=processing_time).toTable(ICEBERG_TABLE)
+    query = apply_stream_trigger(writer, stop_after_batch=stop_after_batch, processing_time=processing_time).start()
     query.awaitTermination()
 
 

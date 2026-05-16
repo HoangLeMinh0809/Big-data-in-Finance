@@ -36,6 +36,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "total_precipitation",
             "mean_sea_level_pressure",
         ],
+        "pressure_level_variables": [
+            "u_component_of_wind",
+            "v_component_of_wind",
+            "vertical_velocity",
+            "geopotential",
+            "temperature",
+            "specific_humidity",
+        ],
+        "pressure_levels": [1000, 925, 850, 700, 600, 500, 400],
+        "pressure_levels_time_utc": ["00:00", "06:00", "12:00", "18:00"],
     },
     "sentinel5p": {
         "raw_base_path": "hdfs://namenode:9000/raw/sentinel5p",
@@ -51,6 +61,30 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "horizons_hours": [6, 12, 24],
         "lag_hours": [1, 3, 6, 12, 24],
         "rolling_hours": [3, 6, 24],
+    },
+    "hysplit": {
+        "backward_hours": 72,
+        "forward_hours": 24,
+        "backward_altitudes_m": [100, 500, 1000],
+        "forward_altitudes_m": [50, 200, 500],
+        "init_offsets_deg": {
+            "lat": [-0.2, 0.0, 0.2],
+            "lon": [-0.2, 0.0, 0.2],
+        },
+        "run_hours_utc": [0, 6, 12, 18],
+        "meteo_interval_hours": 6,
+        "pm25_trigger_threshold": 75,
+    },
+    "trajectory": {
+        "anchor_hours": [0, -6, -12, -24, -36, -48, -60, -72],
+        "cluster_k_min": 3,
+        "cluster_k_max": 10,
+        "cluster_k_default": 6,
+    },
+    "sampling": {
+        "path_window_start_h": -72,
+        "path_window_end_h": -24,
+        "max_distance_deg": 0.5,
     },
 }
 
@@ -214,6 +248,10 @@ def get_era5_pressure_levels() -> list[int]:
 
 def get_era5_pressure_level_variables() -> list[str]:
     return [str(v) for v in load_config()["era5"].get("pressure_level_variables", [])]
+
+
+def get_era5_pressure_level_times() -> list[str]:
+    return [str(v) for v in load_config()["era5"].get("pressure_levels_time_utc", [])]
 
 
 def get_table_names() -> dict[str, str]:

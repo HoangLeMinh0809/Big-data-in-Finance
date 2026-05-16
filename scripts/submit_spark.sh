@@ -11,7 +11,10 @@
 #   KAFKA_STARTING_OFFSETS=earliest bash scripts/submit_spark.sh sentinel5p
 #   bash scripts/submit_spark.sh era5-ingest   # download ERA5 + publish metadata to Kafka
 #   bash scripts/submit_spark.sh era5-files    # Spark consumer: Kafka era5-files -> Iceberg
-#   bash scripts/submit_spark.sh era5-pressure-arl  # Convert ERA5 pressure-level NetCDF -> HYSPLIT ARL
+#   bash scripts/submit_spark.sh era5-pressure-arl  # Convert ERA5 pressure-level GRIB -> HYSPLIT ARL
+#   bash scripts/submit_spark.sh hysplit-run
+#   bash scripts/submit_spark.sh hysplit-parse
+#   bash scripts/submit_spark.sh hysplit-cluster
 # =============================================================================
 
 set -euo pipefail
@@ -33,6 +36,7 @@ DETACH="${DETACH:-false}"
 STOP_AFTER_BATCH="${STOP_AFTER_BATCH:-false}"
 PROCESSING_TIME="${PROCESSING_TIME:-}"
 KAFKA_STARTING_OFFSETS="${KAFKA_STARTING_OFFSETS:-latest}"
+CHECKPOINT_PATH_OVERRIDE="${CHECKPOINT_PATH:-}"
 START_DATE="${START_DATE:-}"
 END_DATE="${END_DATE:-}"
 ERA5_START_DATE="${ERA5_START_DATE:-}"
@@ -261,11 +265,11 @@ case "$JOB_TYPE" in
     JOB_TYPE_KIND="spark"
     APP_NAME="HYSPLITTrajectoryRun"
     JOB_FILE="/opt/spark-jobs/hysplit_trajectory_run.py"
-    JOB_ARGS=("--full-refresh" "$FULL_REFRESH" "--direction" "${HYSPLIT_DIRECTION:-both}")
-    HDFS_DATA_DIR="/warehouse/iceberg/trajectory/hysplit_runs_bronze"
-    HDFS_CHECKPOINT_DIR="/checkpoints/hysplit_trajectory_run"
+    JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/raw/hysplit/trajectories"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hysplit_run"
     ICEBERG_TABLE="ais.trajectory.hysplit_runs_bronze"
-    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hysplit_trajectory_run/"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hysplit_run/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   hysplit-parse)
@@ -274,9 +278,9 @@ case "$JOB_TYPE" in
     JOB_FILE="/opt/spark-jobs/hysplit_trajectory_parse_silver.py"
     JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
     HDFS_DATA_DIR="/warehouse/iceberg/trajectory/hysplit_trajectories_silver"
-    HDFS_CHECKPOINT_DIR="/checkpoints/hysplit_trajectory_parse"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hysplit_parse"
     ICEBERG_TABLE="ais.trajectory.hysplit_trajectories_silver"
-    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hysplit_trajectory_parse/"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hysplit_parse/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   hysplit-cluster)
@@ -284,10 +288,13 @@ case "$JOB_TYPE" in
     APP_NAME="HYSPLITTrajectoryClusterSilver"
     JOB_FILE="/opt/spark-jobs/hysplit_trajectory_cluster_silver.py"
     JOB_ARGS=("--full-refresh" "$FULL_REFRESH")
+    if [ -n "${ANCHOR_HOURS:-}" ]; then
+      JOB_ARGS+=("--anchor-hours" "$ANCHOR_HOURS")
+    fi
     HDFS_DATA_DIR="/warehouse/iceberg/trajectory/hysplit_trajectories_clustered_silver"
-    HDFS_CHECKPOINT_DIR="/checkpoints/hysplit_trajectory_cluster"
+    HDFS_CHECKPOINT_DIR="/checkpoints/hysplit_cluster"
     ICEBERG_TABLE="ais.trajectory.hysplit_trajectories_clustered_silver"
-    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hysplit_trajectory_cluster/"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/hysplit_cluster/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
   sentinel5p-hanoi-silver)
@@ -420,6 +427,10 @@ case "$JOB_TYPE" in
     ;;
 esac
 
+if [ -n "$CHECKPOINT_PATH_OVERRIDE" ]; then
+  CHECKPOINT_PATH="$CHECKPOINT_PATH_OVERRIDE"
+fi
+
 case "$JOB_TYPE" in
   hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
     if [ -n "$START_DATE" ]; then
@@ -510,6 +521,14 @@ DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_ERA5_2ARL_BIN=${HYSPLIT_ERA5_2ARL_BIN:-}")
 DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_ERA5_2ARL_TEMPLATE=${HYSPLIT_ERA5_2ARL_TEMPLATE:-}")
 DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_BIN=${HYSPLIT_BIN:-}")
 DOCKER_EXEC_ARGS+=("-e" "PM25_TRIGGER_THRESHOLD=${PM25_TRIGGER_THRESHOLD:-}")
+DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_BIN=${HYSPLIT_BIN:-/opt/hysplit/exec/hyts_std}")
+DOCKER_EXEC_ARGS+=("-e" "HYSPLIT_OUTPUT_BASE_PATH=${HYSPLIT_OUTPUT_BASE_PATH:-hdfs://namenode:9000/raw/hysplit/trajectories}")
+if [ -n "${DIRECTION:-}" ]; then
+  DOCKER_EXEC_ARGS+=("-e" "DIRECTION=${DIRECTION}")
+fi
+if [ -n "${ANCHOR_HOURS:-}" ]; then
+  DOCKER_EXEC_ARGS+=("-e" "ANCHOR_HOURS=${ANCHOR_HOURS}")
+fi
 
 SPARK_EXTRA_CONF=()
 if [ -n "$SPARK_CORES_MAX" ]; then
