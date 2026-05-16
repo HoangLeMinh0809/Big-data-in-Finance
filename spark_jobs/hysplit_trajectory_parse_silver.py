@@ -52,8 +52,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--start-date", type=str, help="YYYY-MM-DD inclusive start date", required=False)
     p.add_argument("--end-date", type=str, help="YYYY-MM-DD inclusive end date", required=False)
-    p.add_argument("--full-refresh", action="store_true")
-    return p.parse_args()
+    p.add_argument("--full-refresh", nargs="?", const="1", default=os.environ.get("FULL_REFRESH", "0"))
+    args = p.parse_args()
+    args.full_refresh = str(args.full_refresh).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return args
 
 
 def make_spark() -> SparkSession:
@@ -289,6 +291,8 @@ def main() -> None:
 
     # Write to Iceberg
     if deduped.count() > 0:
+        if args.full_refresh:
+            spark.sql(f"DELETE FROM {TRAJ_SILVER_TABLE}")
         deduped.write.format("iceberg").mode("append").saveAsTable(TRAJ_SILVER_TABLE)
 
     print(f"Parsed HYSPLIT summary: input_count={input_count}, output_count={output_count}, duplicate_count={duplicate_count}")

@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import coalesce, col
 
 
 DEFAULT_HYSPLIT_BIN = os.environ.get("HYSPLIT_BIN", "/opt/hysplit/exec/hysplit")
@@ -40,8 +40,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start-date", type=str, help="YYYY-MM-DD inclusive start date", required=False)
     p.add_argument("--end-date", type=str, help="YYYY-MM-DD inclusive end date", required=False)
     p.add_argument("--direction", choices=("backward", "forward", "both"), default="both")
-    p.add_argument("--full-refresh", action="store_true")
-    return p.parse_args()
+    p.add_argument("--full-refresh", nargs="?", const="1", default=os.environ.get("FULL_REFRESH", "0"))
+    args = p.parse_args()
+    args.full_refresh = str(args.full_refresh).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return args
 
 
 def make_spark() -> SparkSession:
@@ -73,7 +75,7 @@ def should_run_backward_for_time(spark: SparkSession, init_time_iso: str) -> boo
     df = (
         spark.read.format("iceberg").load(OPENAQ_TABLE)
         .filter(col("hour") == ts_hour)
-        .select("pm25")
+        .select(coalesce(col("pm25_mean"), col("pm25_median")).alias("pm25"))
     )
     val = df.limit(1).collect()
     if not val:
@@ -201,6 +203,8 @@ def main() -> None:
 
     # Write metadata results back to Iceberg table
     if out_records:
+        if args.full_refresh:
+            spark.sql(f"DELETE FROM {HYSPLIT_RUNS_TABLE}")
         # Create DataFrame from Python dicts; datetimes are preserved as TimestampType.
         out_df = spark.createDataFrame(out_records)
         # Ensure the destination namespace exists and write append

@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--start-date", type=str, required=False)
     p.add_argument("--end-date", type=str, required=False)
-    p.add_argument("--full-refresh", action="store_true")
+    p.add_argument("--full-refresh", nargs="?", const="1", default=os.environ.get("FULL_REFRESH", "0"))
     p.add_argument(
         "--anchor-hours",
         type=str,
@@ -57,7 +57,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--k-min", type=int, default=3)
     p.add_argument("--k-max", type=int, default=10)
     p.add_argument("--k-default", type=int, default=6)
-    return p.parse_args()
+    args = p.parse_args()
+    args.full_refresh = str(args.full_refresh).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return args
 
 
 def make_spark() -> SparkSession:
@@ -165,14 +167,32 @@ def main() -> None:
     source_lat_col = preferred_lat if preferred_lat in predicted.columns else imp_lat
     source_lon_col = preferred_lon if preferred_lon in predicted.columns else imp_lon
 
-    out = predicted.select(
+    assignments = predicted.select(
         col("traj_id"),
         col("cluster_id"),
         col("direction"),
         col(source_lat_col).alias("source_lat"),
         col(source_lon_col).alias("source_lon"),
         col(f"alt_{anchor_hours[0]}").alias("source_alt_m"),
-        col("spark_processed_at"),
+        col("spark_processed_at").alias("cluster_processed_at"),
+    )
+
+    out = (
+        df.join(assignments, ["traj_id", "direction"], "inner")
+        .select(
+            col("traj_id"),
+            col("cluster_id"),
+            col("direction"),
+            col("age_h"),
+            col("lat"),
+            col("lon"),
+            col("alt_m"),
+            col("timestamp"),
+            col("source_lat"),
+            col("source_lon"),
+            col("source_alt_m"),
+            col("cluster_processed_at").alias("spark_processed_at"),
+        )
     )
 
     # Metrics and distribution
@@ -184,10 +204,11 @@ def main() -> None:
         print(f"  cluster={row['cluster_id']}: n={row['count']}")
 
     # Write to Iceberg
-    mode = "overwrite" if args.full_refresh else "append"
-    out.write.format("iceberg").mode(mode).saveAsTable(HYSPLIT_CLUSTER_SILVER_TABLE)
+    if args.full_refresh:
+        spark.sql(f"DELETE FROM {HYSPLIT_CLUSTER_SILVER_TABLE}")
+    out.write.format("iceberg").mode("append").saveAsTable(HYSPLIT_CLUSTER_SILVER_TABLE)
 
-    print(f"Wrote clustered trajectories to {HYSPLIT_CLUSTER_SILVER_TABLE} (mode={mode})")
+    print(f"Wrote clustered trajectories to {HYSPLIT_CLUSTER_SILVER_TABLE}")
 
 
 if __name__ == "__main__":
