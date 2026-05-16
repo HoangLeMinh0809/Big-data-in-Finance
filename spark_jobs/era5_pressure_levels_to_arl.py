@@ -65,6 +65,8 @@ def ensure_table(spark: SparkSession, table_name: str) -> None:
             year INT,
             month INT,
             source_nc STRING,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
             arl_path STRING,
             checksum STRING,
             created_at TIMESTAMP,
@@ -75,6 +77,10 @@ def ensure_table(spark: SparkSession, table_name: str) -> None:
         TBLPROPERTIES ('format-version'='2')
         """
     )
+    existing = set(spark.table(table_name).columns)
+    for column, dtype in {"start_time": "TIMESTAMP", "end_time": "TIMESTAMP"}.items():
+        if column not in existing:
+            spark.sql(f"ALTER TABLE {table_name} ADD COLUMN {column} {dtype}")
 
 
 def hdfs_remote_path(path: str) -> str:
@@ -299,6 +305,8 @@ def main() -> None:
                         "year": year,
                         "month": month,
                         "source_nc": source_nc,
+                        "start_time": item.get("start_time"),
+                        "end_time": item.get("end_time"),
                         "arl_path": arl_path,
                         "checksum": checksum,
                         "created_at": created_at,

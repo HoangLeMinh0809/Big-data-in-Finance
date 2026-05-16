@@ -1,202 +1,25 @@
-"""Parse HYSPLIT trajectory text outputs from HDFS and write to Iceberg (silver).
-
-Reads metadata from `ais.trajectory.hysplit_runs_bronze` to discover
-successful runs and their `output_path` on HDFS, parses the trajectory text
-files and writes normalized rows into `ais.trajectory.hysplit_trajectories_silver`.
-
-The job supports standard args: `--start-date`, `--end-date`, `--full-refresh`.
-
-Acceptance logs: prints `input_count`, `output_count`, `duplicate_count`,
-`min_time`, `max_time`.
-
-Usage example:
-  spark-submit --master spark://spark-master:7077 \ 
-    spark_jobs/hysplit_trajectory_parse_silver.py --start-date 2026-05-09 --end-date 2026-05-16
-"""
+"""Parse HYSPLIT tdump outputs from HDFS into trajectory silver Iceberg table."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
-    IntegerType,
     DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
     TimestampType,
 )
-from pyspark.sql.functions import (
-    input_file_name,
-    current_timestamp,
-    col,
-    lit,
-    to_timestamp,
-    min as sf_min,
-    max as sf_max,
-    sum as sf_sum,
-)
 
-
-RUNS_TABLE = os.environ.get("HYSPLIT_RUNS_TABLE", "ais.trajectory.hysplit_runs_bronze")
-TRAJ_SILVER_TABLE = os.environ.get("HYSPLIT_TRAJ_SILVER_TABLE", "ais.trajectory.hysplit_trajectories_silver")
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--start-date", type=str, help="YYYY-MM-DD inclusive start date", required=False)
-    p.add_argument("--end-date", type=str, help="YYYY-MM-DD inclusive end date", required=False)
-    p.add_argument("--full-refresh", action="store_true")
-    return p.parse_args()
-
-
-def make_spark() -> SparkSession:
-    return (
-        SparkSession.builder
-        .appName("HYSPLIT_Trajectory_Parse_Silver")
-        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-        .config("spark.sql.catalog.ais", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.ais.type", "hadoop")
-        .config("spark.sql.catalog.ais.warehouse", os.environ.get("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg"))
-        .config("spark.hadoop.fs.defaultFS", os.environ.get("HDFS_DEFAULT", "hdfs://namenode:9000"))
-        .getOrCreate()
-    )
-
-
-def _parse_datetime_from_tokens(tokens: list[str]) -> Optional[datetime]:
-    """Try several common datetime token layouts, return aware UTC datetime or None."""
-    try:
-        # Case: ISO date + time e.g. 2026-05-16 12:00:00
-        if len(tokens) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}", tokens[0]) and ":" in tokens[1]:
-            dt = datetime.fromisoformat(tokens[0] + " " + tokens[1])
-            return dt.replace(tzinfo=timezone.utc)
-
-        # Case: space-separated ints: YYYY MM DD HH MM SS
-        if len(tokens) >= 6 and all(re.match(r"^\d+$", t) for t in tokens[:6]):
-            y, m, d, hh, mm, ss = map(int, tokens[:6])
-            return datetime(y, m, d, hh, mm, ss, tzinfo=timezone.utc)
-    except Exception:
-        return None
-    return None
-
-
-def _find_latlonalt(tokens: list[str]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """Search token sequence for plausible (lat, lon, alt_m).
-
-    Returns (lat, lon, alt_m) or (None, None, None).
-    """
-    for i in range(len(tokens) - 1):
-        try:
-            a = float(tokens[i])
-            b = float(tokens[i + 1])
-        except Exception:
-            continue
-
-        # lat/lon ordering: lat in [-90,90], lon in [-180,180]
-        if -90.0 <= a <= 90.0 and -180.0 <= b <= 180.0:
-            lat, lon = a, b
-            alt = None
-            if i + 2 < len(tokens):
-                try:
-                    alt = float(tokens[i + 2])
-                except Exception:
-                    alt = None
-            return lat, lon, alt
-
-        # or lon/lat ordering
-        if -180.0 <= a <= 180.0 and -90.0 <= b <= 90.0:
-            lon, lat = a, b
-            alt = None
-            if i + 2 < len(tokens):
-                try:
-                    alt = float(tokens[i + 2])
-                except Exception:
-                    alt = None
-            return lat, lon, alt
-
-    return None, None, None
-
-
-def parse_line_for_run(record: tuple) -> Optional[tuple]:
-    """Parse one HYSPLIT output line for a specific run.
-
-    record: (run_id, direction, path, init_time (ts or None), line)
-    returns tuple matching schema or None
-    """
-    run_id, direction, path, init_time, line = record
-    line = line.strip()
-    if not line:
-        return None
-    if line.startswith("#") or line.lower().startswith("start"):
-        return None
-
-    # Tokens
-    tokens = re.split(r"\s+", line)
-
-    # attempt to parse datetime
-    dt = _parse_datetime_from_tokens(tokens)
-
-    # find lat/lon/alt
-    lat, lon, alt = _find_latlonalt(tokens)
-
-    if dt is None and (lat is None or lon is None):
-        # unable to parse
-        return None
-
-    # compute year/month/day/hour/minute
-    try:
-        year = dt.year if dt is not None else None
-        month = dt.month if dt is not None else None
-        day = dt.day if dt is not None else None
-        hour = dt.hour if dt is not None else None
-        minute = dt.minute if dt is not None else None
-    except Exception:
-        year = month = day = hour = minute = None
-
-    # compute age_h relative to init_time if available
-    age_h = None
-    if dt is not None and init_time is not None:
-        try:
-            # init_time can be a python datetime, or string; normalize
-            if isinstance(init_time, str):
-                init_dt = datetime.fromisoformat(init_time)
-            else:
-                init_dt = init_time
-            # age = (dt - init_dt) hours. Round to nearest int
-            age_h = int(round((dt - init_dt).total_seconds() / 3600.0))
-        except Exception:
-            age_h = None
-
-    # deterministic traj_id: md5 of line + run_id + basename
-    try:
-        file_basename = os.path.basename(path) if path else ""
-        h = hashlib.md5((line + (run_id or "") + file_basename).encode("utf-8")).hexdigest()
-        traj_id = f"{run_id}-{h}"
-    except Exception:
-        traj_id = f"{run_id}-{hash(line)}"
-
-    return (
-        traj_id,
-        direction,
-        0,
-        year if year is not None else -1,
-        month if month is not None else -1,
-        day if day is not None else -1,
-        hour if hour is not None else -1,
-        minute if minute is not None else 0,
-        None,
-        age_h if age_h is not None else None,
-        float(lat) if lat is not None else None,
-        float(lon) if lon is not None else None,
-        float(alt) if alt is not None else None,
-        dt,
-    )
+from hanoi_config import ICEBERG_CATALOG, ICEBERG_WAREHOUSE, get_table_names
 
 
 SCHEMA = StructType(
@@ -219,80 +42,257 @@ SCHEMA = StructType(
 )
 
 
-def main() -> None:
-    args = parse_args()
-    spark = make_spark()
-    spark.sparkContext.setLogLevel("WARN")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Parse HYSPLIT tdump outputs into Iceberg")
+    parser.add_argument("--start-date", default=os.getenv("START_DATE", ""))
+    parser.add_argument("--end-date", default=os.getenv("END_DATE", ""))
+    parser.add_argument("--full-refresh", nargs="?", const="1", default=os.getenv("FULL_REFRESH", "0"))
+    parser.add_argument("--runs-table", default=os.getenv("HYSPLIT_RUNS_TABLE", ""))
+    parser.add_argument("--target-table", default=os.getenv("HYSPLIT_TRAJ_SILVER_TABLE", ""))
+    return parser.parse_args()
 
-    runs_df = spark.read.format("iceberg").load(RUNS_TABLE)
-    runs_df = runs_df.filter(col("status") == lit("success"))
 
-    if args.start_date:
-        runs_df = runs_df.filter(col("init_time") >= to_timestamp(lit(args.start_date + " 00:00:00")))
-    if args.end_date:
-        runs_df = runs_df.filter(col("init_time") <= to_timestamp(lit(args.end_date + " 23:59:59")))
+def as_bool(raw: str) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    runs = runs_df.select("run_id", "direction", "output_path", "init_time").collect()
-    rdds = []
 
-    for r in runs:
-        path = r.output_path
-        if not path:
-            continue
-
-        # If path contains a wildcard or is a directory, use wholeTextFiles to preserve filenames.
-        try:
-            if "*" in path or path.endswith("/"):
-                pattern = path if "*" in path else path.rstrip("/") + "/*"
-                files_rdd = spark.sparkContext.wholeTextFiles(pattern)
-                # files_rdd: RDD[(filename, filecontents)]
-                src_rdd = files_rdd.flatMap(lambda kv: [(r.run_id, r.direction, kv[0], r.init_time, ln) for ln in kv[1].splitlines()])
-            else:
-                # Try wholeTextFiles first (works for single file URIs), fallback to textFile
-                try:
-                    files_rdd = spark.sparkContext.wholeTextFiles(path)
-                    src_rdd = files_rdd.flatMap(lambda kv: [(r.run_id, r.direction, kv[0], r.init_time, ln) for ln in kv[1].splitlines()])
-                except Exception:
-                    src_rdd = spark.sparkContext.textFile(path).map(lambda ln: (r.run_id, r.direction, path, r.init_time, ln))
-
-            parsed = src_rdd.map(parse_line_for_run).filter(lambda x: x is not None)
-            rdds.append(parsed)
-        except Exception as exc:
-            print(f"[WARN] Unable to read HYSPLIT outputs for run {r.run_id} at {path}: {exc}")
-            continue
-
-    if not rdds:
-        print("[INFO] No HYSPLIT outputs found to parse.")
-        return
-
-    all_rdd = spark.sparkContext.union(rdds)
-    parsed_df = spark.createDataFrame(all_rdd, schema=SCHEMA)
-    parsed_df = parsed_df.withColumn("spark_processed_at", current_timestamp())
-
-    # Metrics
-    input_count = all_rdd.count()
-    output_count = parsed_df.count()
-
-    # duplicates by traj_id + age_h
-    dup_df = parsed_df.groupBy("traj_id", "age_h").count().filter(col("count") > 1)
-    duplicate_count_row = dup_df.select(sf_sum(col("count") - 1)).collect()
-    duplicate_count = int(duplicate_count_row[0][0]) if duplicate_count_row and duplicate_count_row[0][0] is not None else 0
-
-    min_max = parsed_df.agg(sf_min(col("timestamp")), sf_max(col("timestamp"))).collect()[0]
-    min_time = min_max[0]
-    max_time = min_max[1]
-
-    # Deduplicate (keep first by traj_id+age_h)
-    deduped = (
-        parsed_df.dropDuplicates(["traj_id", "age_h"]) if output_count > 0 else parsed_df
+def build_spark() -> SparkSession:
+    return (
+        SparkSession.builder
+        .appName("HYSPLITTrajectoryParseSilver")
+        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.type", "hadoop")
+        .config(f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse", ICEBERG_WAREHOUSE)
+        .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000")
+        .getOrCreate()
     )
 
-    # Write to Iceberg
-    if deduped.count() > 0:
-        deduped.write.format("iceberg").mode("append").saveAsTable(TRAJ_SILVER_TABLE)
 
-    print(f"Parsed HYSPLIT summary: input_count={input_count}, output_count={output_count}, duplicate_count={duplicate_count}")
-    print(f"time_range: {min_time} to {max_time}")
+def ensure_table(spark: SparkSession, table_name: str) -> None:
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {ICEBERG_CATALOG}.trajectory")
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            traj_id STRING,
+            direction STRING,
+            traj_no INT,
+            year INT,
+            month INT,
+            day INT,
+            hour INT,
+            minute INT,
+            forecast_hour INT,
+            age_h INT,
+            lat DOUBLE,
+            lon DOUBLE,
+            alt_m DOUBLE,
+            timestamp TIMESTAMP,
+            spark_processed_at TIMESTAMP
+        )
+        USING ICEBERG
+        PARTITIONED BY (direction, year, month)
+        TBLPROPERTIES ('format-version'='2')
+        """
+    )
+
+
+def parse_year(value: int) -> int:
+    if value < 100:
+        return 2000 + value if value < 70 else 1900 + value
+    return value
+
+
+def parse_hysplit_numeric(run_id: str, direction: str, tokens: list[str]) -> Optional[tuple]:
+    if len(tokens) < 12:
+        return None
+    try:
+        traj_no = int(float(tokens[0]))
+        year = parse_year(int(float(tokens[2])))
+        month = int(float(tokens[3]))
+        day = int(float(tokens[4]))
+        hour = int(float(tokens[5]))
+        minute = int(float(tokens[6]))
+        forecast_hour = int(round(float(tokens[7])))
+        age_h = int(round(float(tokens[8])))
+        lat = float(tokens[9])
+        lon = float(tokens[10])
+        alt_m = float(tokens[11])
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        ts = datetime(year, month, day, hour, minute, tzinfo=timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return None
+    return (
+        f"{run_id}-traj{traj_no}",
+        direction,
+        traj_no,
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        forecast_hour,
+        age_h,
+        lat,
+        lon,
+        alt_m,
+        ts,
+    )
+
+
+def parse_iso_fallback(run_id: str, direction: str, line: str) -> Optional[tuple]:
+    tokens = re.split(r"\s+", line.strip())
+    if len(tokens) < 5:
+        return None
+    try:
+        if re.match(r"\d{4}-\d{2}-\d{2}", tokens[0]) and ":" in tokens[1]:
+            ts = datetime.fromisoformat(f"{tokens[0]} {tokens[1]}").replace(tzinfo=timezone.utc).replace(tzinfo=None)
+            numeric = [float(t) for t in tokens[2:] if re.match(r"^-?\d+(\.\d+)?$", t)]
+            for i in range(len(numeric) - 1):
+                lat = numeric[i]
+                lon = numeric[i + 1]
+                if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                    alt_m = numeric[i + 2] if i + 2 < len(numeric) else None
+                    return (
+                        f"{run_id}-traj0",
+                        direction,
+                        0,
+                        ts.year,
+                        ts.month,
+                        ts.day,
+                        ts.hour,
+                        ts.minute,
+                        None,
+                        None,
+                        float(lat),
+                        float(lon),
+                        float(alt_m) if alt_m is not None else None,
+                        ts,
+                    )
+    except Exception:
+        return None
+    return None
+
+
+def parse_line(record: tuple) -> Optional[tuple]:
+    run_id, direction, line = record
+    text = (line or "").strip()
+    if not text:
+        return None
+    if text.startswith("#"):
+        return None
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("press", "trajectory", "meteorology", "job id")):
+        return None
+
+    tokens = re.split(r"\s+", text)
+    parsed = parse_hysplit_numeric(run_id, direction, tokens)
+    if parsed is not None:
+        return parsed
+    return parse_iso_fallback(run_id, direction, text)
+
+
+def load_runs(spark: SparkSession, runs_table: str, start_date: str, end_date: str):
+    runs_df = spark.table(runs_table).filter(F.col("status") == F.lit("success")).filter(F.col("output_path").isNotNull())
+    if start_date:
+        runs_df = runs_df.filter(F.col("init_time") >= F.to_timestamp(F.lit(f"{start_date} 00:00:00")))
+    if end_date:
+        runs_df = runs_df.filter(F.col("init_time") <= F.to_timestamp(F.lit(f"{end_date} 23:59:59")))
+    return runs_df.select("run_id", "direction", "output_path").collect()
+
+
+def merge_trajectory_rows(spark: SparkSession, df, table_name: str) -> None:
+    df.createOrReplaceTempView("hysplit_trajectory_updates")
+    spark.sql(
+        f"""
+        MERGE INTO {table_name} t
+        USING hysplit_trajectory_updates s
+        ON t.traj_id = s.traj_id AND t.age_h = s.age_h
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+        """
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    full_refresh = as_bool(args.full_refresh)
+    tables = get_table_names()
+    runs_table = args.runs_table or tables["hysplit_runs_bronze"]
+    target_table = args.target_table or tables["hysplit_traj_silver"]
+
+    spark = build_spark()
+    spark.sparkContext.setLogLevel("WARN")
+    ensure_table(spark, target_table)
+
+    runs = load_runs(spark, runs_table, args.start_date, args.end_date)
+    rdds = []
+    file_count = 0
+    for row in runs:
+        path = row["output_path"]
+        try:
+            files = spark.sparkContext.wholeTextFiles(path)
+            rdds.append(
+                files.flatMap(
+                    lambda kv, run_id=row["run_id"], direction=row["direction"]: [
+                        (run_id, direction, line) for line in kv[1].splitlines()
+                    ]
+                )
+            )
+            file_count += 1
+        except Exception as exc:
+            print(f"[WARN] Cannot read HYSPLIT output run_id={row['run_id']} path={path}: {exc}")
+
+    if not rdds:
+        print(
+            "hysplit_parse_checks={'input_count': 0, 'output_count': 0, 'duplicate_count': 0, "
+            "'min_time': None, 'max_time': None}"
+        )
+        spark.stop()
+        return
+
+    raw_rdd = spark.sparkContext.union(rdds)
+    parsed_rdd = raw_rdd.map(parse_line).filter(lambda value: value is not None)
+    parsed_df = spark.createDataFrame(parsed_rdd, schema=SCHEMA).withColumn("spark_processed_at", F.current_timestamp())
+
+    input_count = raw_rdd.count()
+    output_count = parsed_df.count()
+    if output_count == 0:
+        print(
+            f"hysplit_parse_checks={{'input_count': {input_count}, 'output_count': 0, "
+            "'duplicate_count': 0, 'min_time': None, 'max_time': None}"
+        )
+        spark.stop()
+        return
+
+    duplicate_count = (
+        parsed_df.groupBy("traj_id", "age_h")
+        .count()
+        .filter(F.col("count") > 1)
+        .select(F.sum(F.col("count") - F.lit(1)).alias("duplicates"))
+        .first()["duplicates"]
+    )
+    duplicate_count = int(duplicate_count or 0)
+    bounds = parsed_df.agg(F.min("timestamp").alias("min_time"), F.max("timestamp").alias("max_time")).first()
+    deduped = parsed_df.dropDuplicates(["traj_id", "age_h"])
+
+    if full_refresh:
+        merge_trajectory_rows(spark, deduped, target_table)
+    else:
+        existing = spark.table(target_table).select("traj_id", "age_h")
+        deduped = deduped.join(existing, on=["traj_id", "age_h"], how="left_anti")
+        merge_trajectory_rows(spark, deduped, target_table)
+
+    print(
+        "hysplit_parse_checks="
+        f"{{'input_count': {input_count}, 'output_count': {output_count}, "
+        f"'duplicate_count': {duplicate_count}, 'file_count': {file_count}, "
+        f"'min_time': {repr(str(bounds['min_time']) if bounds else None)}, "
+        f"'max_time': {repr(str(bounds['max_time']) if bounds else None)}}}"
+    )
+    print(f"Saved: {target_table}")
+    spark.stop()
 
 
 if __name__ == "__main__":
