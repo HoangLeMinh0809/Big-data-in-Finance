@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import math
 
-from pyspark.sql import SparkSession, Window
+from pyspark.sql import SparkSession
+from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from hanoi_config import (
@@ -50,11 +52,34 @@ OUTPUT_COLUMNS = [
     "aod_mean",
     "aod_max",
     "aod_valid_pct",
+    # New Tier-2 features
+    "pm25_grad_n",
+    "pm25_grad_s",
+    "pm25_grad_e",
+    "pm25_grad_w",
+    "pm25_spatial_std",
+    "pm25_grad_mag",
+    "dominant_cluster",
+    "n_traj",
+    "traj_source_lat",
+    "traj_source_lon",
+    "traj_path_no2_mean",
+    "traj_path_aer_mean",
+    "traj_path_no2_aer_ratio",
+    # Existing time features
     "hour_of_day",
     "day_of_week",
     "month",
     "season",
     "is_weekend",
+    # New sin/cos + rush hour
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos",
+    "is_rush_hour",
     "pm25_lag_1h",
     "pm25_lag_3h",
     "pm25_lag_6h",
@@ -137,11 +162,31 @@ def ensure_table(spark: SparkSession, table_name: str) -> None:
             aod_mean DOUBLE,
             aod_max DOUBLE,
             aod_valid_pct DOUBLE,
+            pm25_grad_n DOUBLE,
+            pm25_grad_s DOUBLE,
+            pm25_grad_e DOUBLE,
+            pm25_grad_w DOUBLE,
+            pm25_spatial_std DOUBLE,
+            pm25_grad_mag DOUBLE,
+            dominant_cluster INT,
+            n_traj INT,
+            traj_source_lat DOUBLE,
+            traj_source_lon DOUBLE,
+            traj_path_no2_mean DOUBLE,
+            traj_path_aer_mean DOUBLE,
+            traj_path_no2_aer_ratio DOUBLE,
             hour_of_day INT,
             day_of_week INT,
             month INT,
             season STRING,
             is_weekend BOOLEAN,
+            hour_sin DOUBLE,
+            hour_cos DOUBLE,
+            dow_sin DOUBLE,
+            dow_cos DOUBLE,
+            month_sin DOUBLE,
+            month_cos DOUBLE,
+            is_rush_hour BOOLEAN,
             pm25_lag_1h DOUBLE,
             pm25_lag_3h DOUBLE,
             pm25_lag_6h DOUBLE,
@@ -248,6 +293,13 @@ def add_time_lag_target_features(df):
             .otherwise(F.lit("autumn")),
         )
         .withColumn("is_weekend", F.dayofweek("hour").isin(1, 7))
+        .withColumn("is_rush_hour", F.col("hour_of_day").isin([7, 8, 9, 17, 18, 19]))
+        .withColumn("hour_sin", F.sin(F.lit(2.0 * math.pi) * (F.col("hour_of_day") / F.lit(24.0))))
+        .withColumn("hour_cos", F.cos(F.lit(2.0 * math.pi) * (F.col("hour_of_day") / F.lit(24.0))))
+        .withColumn("dow_sin", F.sin(F.lit(2.0 * math.pi) * (F.col("day_of_week") / F.lit(7.0))))
+        .withColumn("dow_cos", F.cos(F.lit(2.0 * math.pi) * (F.col("day_of_week") / F.lit(7.0))))
+        .withColumn("month_sin", F.sin(F.lit(2.0 * math.pi) * (F.col("month") / F.lit(12.0))))
+        .withColumn("month_cos", F.cos(F.lit(2.0 * math.pi) * (F.col("month") / F.lit(12.0))))
     )
 
     for lag in get_gold_lag_hours():
@@ -283,6 +335,32 @@ def build_master(spark: SparkSession, tables: dict[str, str], target_table: str,
     s5p = spark.table(tables["sentinel5p_silver"])
     maiac = spark.table(tables["maiac_silver"])
 
+    s5p_features = build_s5p_asof_features(hours, s5p)
+    maiac_features = build_maiac_asof_features(hours, maiac)
+
+    gradient = spark.table(tables["openaq_gradient_silver"]).select(
+        "hour",
+        F.col("pm25_grad_n").alias("pm25_grad_n"),
+        F.col("pm25_grad_s").alias("pm25_grad_s"),
+        F.col("pm25_grad_e").alias("pm25_grad_e"),
+        F.col("pm25_grad_w").alias("pm25_grad_w"),
+        F.col("pm25_spatial_std").alias("pm25_spatial_std"),
+        F.col("pm25_grad_mag").alias("pm25_grad_mag"),
+    )
+    gradient = apply_date_range(gradient, "hour", start_date, end_date)
+
+    traj_hourly = spark.table(tables["trajectory_hourly_silver"]).select(
+        "hour",
+        F.col("dominant_cluster").cast("int").alias("dominant_cluster"),
+        F.col("n_traj").cast("int").alias("n_traj"),
+        F.col("source_lat").cast("double").alias("traj_source_lat"),
+        F.col("source_lon").cast("double").alias("traj_source_lon"),
+        F.col("path_no2_mean").cast("double").alias("traj_path_no2_mean"),
+        F.col("path_aer_mean").cast("double").alias("traj_path_aer_mean"),
+        F.col("path_no2_aer_ratio").cast("double").alias("traj_path_no2_aer_ratio"),
+    )
+    traj_hourly = apply_date_range(traj_hourly, "hour", start_date, end_date)
+
     weather_cols = ["hour", "vis_km", "uv", "condition_code", "is_day", "will_it_rain", "chance_of_rain"]
     era5_cols = [
         "hour",
@@ -298,9 +376,6 @@ def build_master(spark: SparkSession, tables: dict[str, str], target_table: str,
         "total_precipitation_mm",
     ]
 
-    s5p_features = build_s5p_asof_features(hours, s5p)
-    maiac_features = build_maiac_asof_features(hours, maiac)
-
     base = (
         hours
         .join(aq.select("hour", "pm25_median", "pm25_mean", "station_count", "coverage_avg"), "hour", "left")
@@ -308,6 +383,8 @@ def build_master(spark: SparkSession, tables: dict[str, str], target_table: str,
         .join(era5.select(*era5_cols), "hour", "left")
         .join(s5p_features, "hour", "left")
         .join(maiac_features, "hour", "left")
+        .join(gradient, "hour", "left")
+        .join(traj_hourly, "hour", "left")
     )
     return add_time_lag_target_features(base).select(*OUTPUT_COLUMNS)
 
