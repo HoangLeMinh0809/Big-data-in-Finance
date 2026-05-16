@@ -85,12 +85,13 @@ def should_run_backward_for_time(spark: SparkSession, init_time_iso: str) -> boo
     return pm25 >= DEFAULT_PM25_THRESHOLD
 
 
-def run_hysplit_local(hysplit_bin: str, arl_path: str, direction: str, run_id: str, init_lat: float | None = None, init_lon: float | None = None, init_alt_m: float | None = None, duration_hours: int = 72) -> Dict:
+def run_hysplit_local(hysplit_bin: str, arl_path: str, direction: str, run_id: str, init_time=None, init_lat: float | None = None, init_lon: float | None = None, init_alt_m: float | None = None, duration_hours: int = 72) -> Dict:
     """Attempt to run HYSPLIT locally. Returns metadata dict describing outcome."""
+    # Use datetime objects for timestamp fields so Spark/Arrow converts them to TimestampType
     meta: Dict = {
         "run_id": run_id,
         "direction": direction,
-        "init_time": datetime.now(timezone.utc).isoformat(),
+        "init_time": init_time if init_time is not None else datetime.now(timezone.utc),
         "duration_hours": duration_hours,
         "init_lat": init_lat,
         "init_lon": init_lon,
@@ -99,7 +100,7 @@ def run_hysplit_local(hysplit_bin: str, arl_path: str, direction: str, run_id: s
         "output_path": None,
         "status": "skipped",
         "error_message": None,
-        "spark_processed_at": datetime.now(timezone.utc).isoformat(),
+        "spark_processed_at": datetime.now(timezone.utc),
     }
 
     if not os.path.exists(hysplit_bin):
@@ -120,9 +121,19 @@ def run_hysplit_local(hysplit_bin: str, arl_path: str, direction: str, run_id: s
             meta["error_message"] = proc.stderr.strip()[:4000]
         else:
             meta["status"] = "success"
-            # In a real deployment, parse stdout to locate the produced file(s) and
-            # set `output_path` to the HDFS location where those files were copied.
-            meta["output_path"] = proc.stdout.strip().splitlines()[-1] if proc.stdout else None
+            # Attempt to extract a produced path from stdout. If the hysplit wrapper
+            # prints a HDFS path as the last line, use it. Otherwise leave None.
+            out_lines = proc.stdout.strip().splitlines() if proc.stdout else []
+            candidate = None
+            for ln in reversed(out_lines):
+                ln = ln.strip()
+                if ln:
+                    # crude heuristic: HDFS or absolute path contains '/'
+                    if "/" in ln:
+                        candidate = ln
+                        break
+            meta["output_path"] = candidate
+            # spark_processed_at already contains a datetime object
     except Exception as exc:
         meta["status"] = "failed"
         meta["error_message"] = str(exc)
@@ -160,13 +171,16 @@ def main() -> None:
         for direction in ([args.direction] if args.direction in ("backward", "forward") else ("backward", "forward")):
             # If backward, consult OpenAQ to decide whether to run
             if direction == "backward":
-                init_time_iso = getattr(r, "created_at", datetime.now(timezone.utc).isoformat())
+                init_time_val = getattr(r, "created_at", None)
+                init_time_iso = (
+                    init_time_val.isoformat() if hasattr(init_time_val, "isoformat") else (str(init_time_val) if init_time_val is not None else datetime.now(timezone.utc).isoformat())
+                )
                 if not should_run_backward_for_time(spark, init_time_iso):
                     skipped_count += 1
                     out_records.append({
                         "run_id": run_id,
                         "direction": direction,
-                        "init_time": init_time_iso,
+                        "init_time": init_time_val if init_time_val is not None else datetime.now(timezone.utc),
                         "duration_hours": 72,
                         "init_lat": None,
                         "init_lon": None,
@@ -175,17 +189,19 @@ def main() -> None:
                         "output_path": None,
                         "status": "skipped",
                         "error_message": "PM2.5 below threshold; skipping backward run",
-                        "spark_processed_at": datetime.now(timezone.utc).isoformat(),
+                        "spark_processed_at": datetime.now(timezone.utc),
                     })
                     continue
 
             # Attempt run (may be a no-op if binary is missing)
-            meta = run_hysplit_local(DEFAULT_HYSPLIT_BIN, arl_path, direction, run_id)
+            init_time_for_run = getattr(r, "created_at", None)
+            meta = run_hysplit_local(DEFAULT_HYSPLIT_BIN, arl_path, direction, run_id, init_time=init_time_for_run)
             out_records.append(meta)
             run_count += 1
 
     # Write metadata results back to Iceberg table
     if out_records:
+        # Create DataFrame from Python dicts; datetimes are preserved as TimestampType.
         out_df = spark.createDataFrame(out_records)
         # Ensure the destination namespace exists and write append
         out_df.write.format("iceberg").mode("append").saveAsTable(HYSPLIT_RUNS_TABLE)
