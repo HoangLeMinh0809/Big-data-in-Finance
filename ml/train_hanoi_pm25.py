@@ -59,11 +59,36 @@ FEATURE_COLUMNS = [
     "aod_mean",
     "aod_max",
     "aod_valid_pct",
+    # Tier-2: gradient
+    "pm25_grad_n",
+    "pm25_grad_s",
+    "pm25_grad_e",
+    "pm25_grad_w",
+    "pm25_spatial_std",
+    "pm25_grad_mag",
+    # Tier-2: trajectory
+    "dominant_cluster",
+    "n_traj",
+    "traj_source_lat",
+    "traj_source_lon",
+    "traj_path_no2_mean",
+    "traj_path_aer_mean",
+    "traj_path_no2_aer_ratio",
+    # time
     "hour_of_day",
     "day_of_week",
     "month",
     "season",
     "is_weekend",
+    # Tier-2: time_sincos
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos",
+    "is_rush_hour",
+    # lags/rolling
     "pm25_lag_1h",
     "pm25_lag_3h",
     "pm25_lag_6h",
@@ -237,8 +262,21 @@ def train_one_horizon(pdf: pd.DataFrame, args: argparse.Namespace, horizon: int,
     created_at = datetime.utcnow()
 
     print(
-        f"horizon={horizon} validation_mae={val_mae} validation_rmse={val_rmse} "
-        f"test_mae={test_mae} test_rmse={test_rmse}"
+        "train_metrics "
+        f"horizon={horizon} "
+        f"split=train count={int(train_mask.sum())}"
+    )
+    print(
+        "validation_metrics "
+        f"horizon={horizon} "
+        f"mae={val_mae} rmse={val_rmse} mape={val_mape} "
+        f"count={int(val_mask.sum())}"
+    )
+    print(
+        "test_metrics "
+        f"horizon={horizon} "
+        f"mae={test_mae} rmse={test_rmse} mape={test_mape} "
+        f"count={int(test_mask.sum())}"
     )
 
     return {

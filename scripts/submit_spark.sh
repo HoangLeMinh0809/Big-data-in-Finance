@@ -330,6 +330,37 @@ case "$JOB_TYPE" in
     CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/sentinel5p_grid_silver/"
     PACKAGES="${ICEBERG_PACKAGES}"
     ;;
+  traj-path-sampling)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="TrajectoryPathSamplingSilver"
+    JOB_FILE="/opt/spark-jobs/trajectory_path_sampling_silver.py"
+    JOB_ARGS=("--start-date" "$START_DATE" "--end-date" "$END_DATE" "--full-refresh" "$FULL_REFRESH")
+    if [ -n "${PATH_WINDOW_START_H:-}" ]; then
+      JOB_ARGS+=("--path-window-start-h" "$PATH_WINDOW_START_H")
+    fi
+    if [ -n "${PATH_WINDOW_END_H:-}" ]; then
+      JOB_ARGS+=("--path-window-end-h" "$PATH_WINDOW_END_H")
+    fi
+    if [ -n "${MAX_DISTANCE_DEG:-}" ]; then
+      JOB_ARGS+=("--max-distance-deg" "$MAX_DISTANCE_DEG")
+    fi
+    HDFS_DATA_DIR="/warehouse/iceberg/features/trajectory_path_satellite_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/trajectory_path_sampling_silver"
+    ICEBERG_TABLE="ais.features.trajectory_path_satellite_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/trajectory_path_sampling_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
+  traj-hourly-features)
+    JOB_TYPE_KIND="spark"
+    APP_NAME="TrajectoryHourlyFeaturesSilver"
+    JOB_FILE="/opt/spark-jobs/trajectory_hourly_features_silver.py"
+    JOB_ARGS=("--start-date" "$START_DATE" "--end-date" "$END_DATE" "--full-refresh" "$FULL_REFRESH")
+    HDFS_DATA_DIR="/warehouse/iceberg/features/trajectory_hourly_features_silver"
+    HDFS_CHECKPOINT_DIR="/checkpoints/trajectory_hourly_features_silver"
+    ICEBERG_TABLE="ais.features.trajectory_hourly_features_silver"
+    CHECKPOINT_PATH="hdfs://namenode:9000/checkpoints/trajectory_hourly_features_silver/"
+    PACKAGES="${ICEBERG_PACKAGES}"
+    ;;
   maiac-hanoi-silver)
     JOB_TYPE_KIND="spark"
     APP_NAME="MAIACHanoiSilver"
@@ -422,7 +453,7 @@ case "$JOB_TYPE" in
     PACKAGES="${CASSANDRA_PACKAGES}"
     ;;
   *)
-    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
+    echo "Usage: $0 [weather|openaq|sentinel5p|maiac|era5-files|weather-ingest|openaq-ingest|sentinel5p-ingest|maiac-ingest|era5-ingest|hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|traj-path-sampling|traj-hourly-features|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold|hanoi-train-baseline|cassandra-weather|cassandra-openaq|ensure-iceberg|maintenance-iceberg|reconcile-serving]"
     exit 1
     ;;
 esac
@@ -432,7 +463,7 @@ if [ -n "$CHECKPOINT_PATH_OVERRIDE" ]; then
 fi
 
 case "$JOB_TYPE" in
-  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
+  hanoi-openaq-silver|hanoi-weather-silver|era5-surface-hanoi-silver|era5-pressure-arl|hysplit-run|hysplit-parse|hysplit-cluster|sentinel5p-hanoi-silver|openaq-gradient|s5p-grid-silver|traj-path-sampling|traj-hourly-features|maiac-hanoi-silver|hanoi-master-features-gold|hanoi-training-dataset-gold)
     if [ -n "$START_DATE" ]; then
       JOB_ARGS+=("--start-date" "$START_DATE")
     fi
