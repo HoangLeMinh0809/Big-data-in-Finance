@@ -613,7 +613,8 @@ def main() -> None:
     if start_date is None or end_date is None:
         print(
             "hysplit_run_checks={'input_count': 0, 'output_count': 0, 'duplicate_count': 0, "
-            "'success_count': 0, 'failure_count': 0, 'min_time': None, 'max_time': None}"
+            "'success_count': 0, 'failure_count': 0, 'trajectory_count': 0, "
+            "'error_count': 0, 'min_time': None, 'max_time': None}"
         )
         print("[INFO] No ARL files available for HYSPLIT")
         spark.stop()
@@ -679,7 +680,8 @@ def main() -> None:
         "hysplit_run_checks="
         f"{{'input_count': {len(rows) + duplicate_count}, 'output_count': {len(rows)}, "
         f"'duplicate_count': {duplicate_count}, 'success_count': {success_count}, "
-        f"'failure_count': {failure_count}, "
+        f"'failure_count': {failure_count}, 'trajectory_count': {success_count}, "
+        f"'error_count': {failure_count}, "
         f"'min_time': {repr(str(min_time) if min_time else None)}, "
         f"'max_time': {repr(str(max_time) if max_time else None)}}}"
     )

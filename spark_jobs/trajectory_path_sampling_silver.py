@@ -220,6 +220,11 @@ def main() -> None:
     matched_count = matched_traj.count()
     output_count = output_df.count()
     duplicate_count = 0
+    matched_pixel_ratio = float(matched_count) / float(input_count) if input_count else None
+    path_no2_stats = output_df.agg(
+        F.min("path_no2_mean").alias("path_no2_mean_min"),
+        F.max("path_no2_mean").alias("path_no2_mean_max"),
+    ).first()
 
     bounds = spark.table(traj_table).filter(F.col("direction") == F.lit("backward")).agg(
         F.min("timestamp").alias("min_time"), F.max("timestamp").alias("max_time")
@@ -232,6 +237,20 @@ def main() -> None:
     print(f"max_time={bounds['max_time'] if bounds else None}")
     print(f"matched_traj_count={matched_count}")
     print(f"unmatched_traj_count={max(0, input_count - matched_count)}")
+    print(f"matched_pixel_ratio={matched_pixel_ratio}")
+    print(f"path_no2_mean_min={path_no2_stats['path_no2_mean_min'] if path_no2_stats else None}")
+    print(f"path_no2_mean_max={path_no2_stats['path_no2_mean_max'] if path_no2_stats else None}")
+    print(
+        "trajectory_path_sampling_checks="
+        f"{{'input_count': {input_count}, 'output_count': {output_count}, "
+        f"'duplicate_count': {duplicate_count}, 'matched_traj_count': {matched_count}, "
+        f"'unmatched_traj_count': {max(0, input_count - matched_count)}, "
+        f"'matched_pixel_ratio': {matched_pixel_ratio}, "
+        f"'path_no2_mean_min': {path_no2_stats['path_no2_mean_min'] if path_no2_stats else None}, "
+        f"'path_no2_mean_max': {path_no2_stats['path_no2_mean_max'] if path_no2_stats else None}, "
+        f"'min_time': {repr(str(bounds['min_time']) if bounds else None)}, "
+        f"'max_time': {repr(str(bounds['max_time']) if bounds else None)}}}"
+    )
 
     merge_iceberg(spark, output_df, target_table, full_refresh=full_refresh)
     print(f"Saved: {target_table}")

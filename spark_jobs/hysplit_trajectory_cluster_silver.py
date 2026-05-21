@@ -136,6 +136,7 @@ def main() -> None:
     if raw_point_count == 0:
         print(
             "hysplit_cluster_checks={'input_count': 0, 'output_count': 0, 'duplicate_count': 0, "
+            "'cluster_distribution': {}, 'missing_cluster_ratio': None, "
             "'min_time': None, 'max_time': None}"
         )
         spark.stop()
@@ -256,13 +257,30 @@ def main() -> None:
     if output_count:
         append_cluster_rows(output, target_table)
 
+    cluster_rows = output.groupBy("cluster_id").count().orderBy("cluster_id").collect()
+    cluster_distribution = {
+        int(row["cluster_id"]): int(row["count"])
+        for row in cluster_rows
+        if row["cluster_id"] is not None
+    }
+    missing_cluster_count = output.filter(F.col("cluster_id").isNull()).count()
+    missing_cluster_ratio = (
+        float(missing_cluster_count) / float(output_count)
+        if output_count
+        else None
+    )
+
     print("Cluster distribution:")
-    for row in output.groupBy("cluster_id").count().orderBy("cluster_id").collect():
+    for row in cluster_rows:
         print(f"  cluster={row['cluster_id']}: n={row['count']}")
+    print(f"cluster_distribution={cluster_distribution}")
+    print(f"missing_cluster_ratio={missing_cluster_ratio}")
     print(
         "hysplit_cluster_checks="
         f"{{'input_count': {input_count}, 'output_count': {output_count}, "
         f"'duplicate_count': {duplicate_count}, "
+        f"'cluster_distribution': {cluster_distribution}, "
+        f"'missing_cluster_ratio': {missing_cluster_ratio}, "
         f"'min_time': {repr(str(bounds['min_time']) if bounds else None)}, "
         f"'max_time': {repr(str(bounds['max_time']) if bounds else None)}}}"
     )

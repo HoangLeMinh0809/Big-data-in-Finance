@@ -116,7 +116,7 @@ services:
       context: ./spark
       dockerfile: Dockerfile
       args:
-        INSTALL_XGBOOST: ${INSTALL_XGBOOST:-true}
+        INSTALL_XGBOOST: ${INSTALL_XGBOOST:-false}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-300}
         PIP_RETRIES: ${PIP_RETRIES:-10}
     image: ais-spark:3.5.3
@@ -150,7 +150,7 @@ services:
       context: ./spark
       dockerfile: Dockerfile
       args:
-        INSTALL_XGBOOST: ${INSTALL_XGBOOST:-true}
+        INSTALL_XGBOOST: ${INSTALL_XGBOOST:-false}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-300}
         PIP_RETRIES: ${PIP_RETRIES:-10}
     image: ais-spark:3.5.3

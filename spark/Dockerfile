@@ -44,25 +44,18 @@ RUN set -eux; \
 
 ENV ECCODES_DEFINITION_PATH=/usr/share/eccodes/definitions
 
-ARG INSTALL_XGBOOST=true
+ARG INSTALL_XGBOOST=false
 ARG PIP_DEFAULT_TIMEOUT=300
 ARG PIP_RETRIES=10
 
 RUN rm -rf /root/.cache/pip && \
     python3 -m pip install --no-cache-dir --default-timeout="${PIP_DEFAULT_TIMEOUT}" --retries="${PIP_RETRIES}" --only-binary=:all: \
     pyyaml==6.0.1 \
-    xarray==2023.1.0 \
     netCDF4==1.6.5 \
-    h5netcdf==1.1.0 \
-    h5py==3.10.0 \
     pyhdf==0.11.4 \
-    rasterio==1.3.9 \
-    "GDAL==$(gdal-config --version)" \
-    pyproj==3.5.0 \
-    shapely==2.0.2 \
     numpy==1.24.4 \
     pandas==1.5.3 \
-    pyarrow==12.0.1 \
+    scipy==1.10.1 \
     scikit-learn==1.3.2 \
     lightgbm==3.3.5 && \
     if [ "${INSTALL_XGBOOST}" = "true" ]; then \

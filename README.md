@@ -576,10 +576,31 @@ Mở HDFS Web UI: http://localhost:9870 -> Utilities -> Browse the file system -
 
 ## 8. Lưu ý thiết kế cho Kubernetes
 
-- Config qua environment variables để có thể chuyển sang `ConfigMap` và `Secret`.
-- HDFS, Cassandra và Airflow Postgres dùng named volumes; khi lên Kubernetes cần thay bằng `PVC`/StatefulSet phù hợp.
-- Ingest và Spark processing tách riêng, giao tiếp qua Kafka, nên có thể chuyển ingest thành CronJob và Spark thành Spark Operator job.
-- Service discovery hiện dùng Docker Compose service names; khi lên Kubernetes cần map sang Service DNS.
+TODO3 đặt Kubernetes làm runtime đích cho compute, không migrate storage/stateful data trong pha này.
+
+- Giữ Kafka/Zookeeper, HDFS/Iceberg warehouse, Cassandra và Airflow metadata DB ở tầng storage/data infrastructure bên ngoài Kubernetes.
+- Docker Compose Spark master/worker chỉ là fallback local/dev; Spark driver/executor pods trên Kubernetes mới là target runtime của TODO3.
+- Airflow tiếp tục là control plane để schedule/backfill/rerun, còn Kubernetes thực thi Spark batch, HYSPLIT/trajectory, ML training, ML inference, API và check jobs.
+- Config runtime đi qua environment variables, ConfigMap hoặc Secret; không hardcode hostname Compose trong code path chạy trên Kubernetes.
+- Pod Kubernetes phải dùng endpoint được override qua `KAFKA_BOOTSTRAP_SERVERS`, `HDFS_NAMENODE`, `HDFS_WEBHDFS_BASE`, `ICEBERG_WAREHOUSE`, `CASSANDRA_HOST` khi cần.
+
+Luồng dữ liệu đích của TODO3:
+
+```text
+External sources
+-> ingest producers
+-> Kafka/HDFS/Iceberg storage layer
+-> Spark jobs on Kubernetes
+-> Iceberg Bronze/Silver/Gold
+-> Hanoi PM2.5 master hourly gold
+-> PM2.5 serving features gold
+-> ML inference Job/CronJob on Kubernetes
+-> PM2.5 prediction table
+-> PM2.5 API Deployment on Kubernetes
+-> dashboard/user
+```
+
+Request-time API chỉ đọc prediction đã materialize và trả JSON. API không submit Spark, không chạy HYSPLIT, không build feature, không train model và không chạy inference trong handler.
 
 ---
 
